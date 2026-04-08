@@ -8,6 +8,7 @@
       "distribution": "internal"
     },
     "preview": {
+      "node": "22.x",
       "distribution": "internal",
       "android": {
         "buildType": "apk"
@@ -19,6 +20,7 @@
       }
     },
     "production": {
+      "node": "22.x",
       "android": {
         "buildType": "app-bundle"
       },
