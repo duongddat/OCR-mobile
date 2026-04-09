@@ -1,5 +1,6 @@
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { useState, useRef } from 'react';
+import * as ImagePicker from 'expo-image-picker';
 import {
   StyleSheet, Text, TouchableOpacity, View,
   ActivityIndicator, ScrollView, TextInput, Image,
@@ -8,6 +9,7 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { CameraView as CameraViewType } from 'expo-camera';
+import { PinchGestureHandler, State } from 'react-native-gesture-handler';
 import { saveToHistory } from '@/utils/history';
 
 const { width: SCREEN_W } = Dimensions.get('window');
@@ -29,6 +31,24 @@ export default function ScannerScreen() {
   const [copied, setCopied] = useState(false);
   const [facing, setFacing] = useState<'back' | 'front'>('back');
   const [containerSize, setContainerSize] = useState({ width: SCREEN_W - 34, height: 300 });
+  const [zoom, setZoom] = useState(0);
+  const baseZoom = useRef(0);
+
+  const zoomIn = () => setZoom(prev => { const n = Math.min(prev + 0.1, 1); baseZoom.current = n; return n; });
+  const zoomOut = () => setZoom(prev => { const n = Math.max(prev - 0.1, 0); baseZoom.current = n; return n; });
+
+  const onPinchEvent = (event: any) => {
+    const scale = event.nativeEvent.scale;
+    // zoom factor can be adjusted. (scale - 1) is how much the pinch expands/shrinks.
+    const newZoom = baseZoom.current + (scale - 1) * 0.5;
+    setZoom(Math.max(0, Math.min(1, newZoom)));
+  };
+
+  const onPinchStateChange = (event: any) => {
+    if (event.nativeEvent.state === State.END) {
+      baseZoom.current = zoom;
+    }
+  };
 
   // ── Permission screen ──────────────────────────────────────────────────────
   if (!permission) return <View style={{ flex: 1, backgroundColor: BG }} />;
@@ -66,6 +86,23 @@ export default function ScannerScreen() {
       } catch (e) {
         console.error('Camera Error:', e);
       }
+    }
+  };
+
+  const pickImage = async () => {
+    try {
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ['images'],
+        quality: 1,
+      });
+
+      if (!result.canceled && result.assets && result.assets.length > 0) {
+        const uri = result.assets[0].uri;
+        setCapturedImage(uri);
+        uploadToServer(uri);
+      }
+    } catch (e) {
+      console.error('Image Picker Error:', e);
     }
   };
 
@@ -152,7 +189,14 @@ export default function ScannerScreen() {
         {/* STATE 1 — Camera */}
         {!capturedImage && (
           <View style={styles.cameraContainer}>
-            <CameraView style={styles.camera} facing={facing} ref={cameraRef} />
+            <PinchGestureHandler
+              onGestureEvent={onPinchEvent}
+              onHandlerStateChange={onPinchStateChange}
+            >
+              <View style={{ flex: 1 }}>
+                <CameraView style={styles.camera} facing={facing} ref={cameraRef} zoom={zoom} />
+              </View>
+            </PinchGestureHandler>
             {/* Dimmed corners */}
             <View style={[styles.overlayTop, { pointerEvents: 'none' }]} />
             <View style={[styles.overlayBottom, { pointerEvents: 'none' }]} />
@@ -166,6 +210,19 @@ export default function ScannerScreen() {
               <View style={[styles.corner, styles.bl]} />
               <View style={[styles.corner, styles.br]} />
               <Text style={styles.frameHint}>Đặt văn bản vào khung</Text>
+            </View>
+
+            {/* Zoom Controls */}
+            <View style={styles.zoomControls}>
+              <TouchableOpacity style={styles.zoomBtn} onPress={zoomIn}>
+                <Ionicons name="add" size={24} color="#fff" />
+              </TouchableOpacity>
+              <View style={styles.zoomTextContainer}>
+                <Text style={styles.zoomText}>{(zoom * 4 + 1).toFixed(1)}x</Text>
+              </View>
+              <TouchableOpacity style={styles.zoomBtn} onPress={zoomOut}>
+                <Ionicons name="remove" size={24} color="#fff" />
+              </TouchableOpacity>
             </View>
 
             {/* Camera Controls */}
@@ -185,8 +242,10 @@ export default function ScannerScreen() {
                 </View>
               </TouchableOpacity>
 
-              {/* Placeholder for balance */}
-              <View style={[styles.ctrlBtn, { opacity: 0 }]} />
+              {/* Gallery / Media picker */}
+              <TouchableOpacity style={styles.ctrlBtn} onPress={pickImage}>
+                <Ionicons name="images-outline" size={24} color="#fff" />
+              </TouchableOpacity>
             </View>
           </View>
         )}
@@ -399,14 +458,14 @@ const styles = StyleSheet.create({
   cameraContainer: { flex: 1, backgroundColor: '#000' },
   camera: { flex: 1 },
 
-  overlayTop: { position: 'absolute', top: 0, left: 0, right: 0, height: '15%', backgroundColor: 'rgba(0,0,0,0.5)' },
-  overlayBottom: { position: 'absolute', bottom: 0, left: 0, right: 0, height: '28%', backgroundColor: 'rgba(0,0,0,0.5)' },
-  overlayLeft: { position: 'absolute', top: '15%', bottom: '28%', left: 0, width: '8%', backgroundColor: 'rgba(0,0,0,0.5)' },
-  overlayRight: { position: 'absolute', top: '15%', bottom: '28%', right: 0, width: '8%', backgroundColor: 'rgba(0,0,0,0.5)' },
+  overlayTop: { position: 'absolute', top: 0, left: 0, right: 0, height: '10%', backgroundColor: 'rgba(0,0,0,0.5)' },
+  overlayBottom: { position: 'absolute', bottom: 0, left: 0, right: 0, height: '30%', backgroundColor: 'rgba(0,0,0,0.5)' },
+  overlayLeft: { position: 'absolute', top: '10%', bottom: '30%', left: 0, width: '8%', backgroundColor: 'rgba(0,0,0,0.5)' },
+  overlayRight: { position: 'absolute', top: '10%', bottom: '30%', right: 0, width: '8%', backgroundColor: 'rgba(0,0,0,0.5)' },
 
   scanFrame: {
     position: 'absolute',
-    top: '15%', left: '8%', right: '8%', bottom: '28%',
+    top: '10%', left: '8%', right: '8%', bottom: '30%',
     justifyContent: 'flex-end', alignItems: 'center',
     paddingBottom: 12,
   },
@@ -422,6 +481,19 @@ const styles = StyleSheet.create({
   frameHint: {
     color: 'rgba(255,255,255,0.7)', fontSize: 13, fontWeight: '500', letterSpacing: 0.3,
   },
+
+  zoomControls: {
+    position: 'absolute', right: 16, top: '40%',
+    transform: [{ translateY: -75 }],
+    backgroundColor: 'rgba(0,0,0,0.3)', borderRadius: 30, paddingVertical: 12, paddingHorizontal: 6,
+    alignItems: 'center', gap: 12,
+  },
+  zoomBtn: {
+    width: 44, height: 44, borderRadius: 22, backgroundColor: 'rgba(255,255,255,0.2)',
+    justifyContent: 'center', alignItems: 'center',
+  },
+  zoomTextContainer: { paddingVertical: 4 },
+  zoomText: { color: '#fff', fontSize: 14, fontWeight: '700' },
 
   camControls: {
     position: 'absolute', bottom: 0, left: 0, right: 0,
