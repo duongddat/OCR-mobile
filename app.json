@@ -2,7 +2,7 @@
   "expo": {
     "name": "ImageToText",
     "slug": "mobile",
-    "version": "1.0.5",
+    "version": "1.0.6",
     "orientation": "portrait",
     "icon": "./assets/images/icon_1.png",
     "scheme": "mobile",
@@ -15,9 +15,9 @@
       "package": "com.aulacsoft.apiocr",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
-        "foregroundImage": "./assets/images/android-icon-foreground.png",
-        "backgroundImage": "./assets/images/android-icon-background.png",
-        "monochromeImage": "./assets/images/android-icon-monochrome.png"
+        "foregroundImage": "./assets/images/android-icon-foreground_1.png",
+        "backgroundImage": "./assets/images/android-icon-background_1.png",
+        "monochromeImage": "./assets/images/icon_1.png"
       },
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false

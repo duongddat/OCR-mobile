@@ -12,7 +12,7 @@ import type { CameraView as CameraViewType } from 'expo-camera';
 import { PinchGestureHandler, State } from 'react-native-gesture-handler';
 import { saveToHistory } from '@/utils/history';
 
-const { width: SCREEN_W } = Dimensions.get('window');
+const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
 const ACCENT = '#06b6d4';
 const BG = '#09090b';
 const SURFACE = '#18181b';
@@ -30,9 +30,31 @@ export default function ScannerScreen() {
   const [capturedImage, setCapturedImage] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [facing, setFacing] = useState<'back' | 'front'>('back');
-  const [containerSize, setContainerSize] = useState({ width: SCREEN_W - 34, height: 300 });
+
+  // Camera zoom
   const [zoom, setZoom] = useState(0);
   const baseZoom = useRef(0);
+
+  // Result image zoom
+  const [imgZoom, setImgZoom] = useState(1);
+  const baseImgZoom = useRef(1);
+
+  const zoomInImg = () => {
+    setImgZoom(prev => { const n = Math.min(prev + 0.5, 5); baseImgZoom.current = n; return n; });
+  };
+  const zoomOutImg = () => {
+    setImgZoom(prev => { const n = Math.max(prev - 0.5, 1); baseImgZoom.current = n; return n; });
+  };
+  const onImgPinchEvent = (event: any) => {
+    const scale = event.nativeEvent.scale;
+    const newZoom = baseImgZoom.current * scale;
+    setImgZoom(Math.max(1, Math.min(5, newZoom)));
+  };
+  const onImgPinchStateChange = (event: any) => {
+    if (event.nativeEvent.state === State.END) {
+      baseImgZoom.current = imgZoom;
+    }
+  };
 
   const zoomIn = () => setZoom(prev => { const n = Math.min(prev + 0.1, 1); baseZoom.current = n; return n; });
   const zoomOut = () => setZoom(prev => { const n = Math.max(prev - 0.1, 0); baseZoom.current = n; return n; });
@@ -161,6 +183,8 @@ export default function ScannerScreen() {
     setOcrText('');
     setOcrDetails([]);
     setCopied(false);
+    setImgZoom(1);
+    baseImgZoom.current = 1;
   };
 
   const copyText = () => {
@@ -278,63 +302,88 @@ export default function ScannerScreen() {
               contentContainerStyle={{ paddingBottom: insets.bottom + 110 }}
             >
               {/* Image preview */}
-              <View style={styles.imgCard}>
-                <View style={{ width: '100%', alignItems: 'center', backgroundColor: '#000', paddingVertical: 10 }}>
+              <View style={[styles.imgCard, { marginHorizontal: 0, marginTop: 0, borderRadius: 0, borderWidth: 0, borderBottomWidth: 1 }]}>
+                <View style={{ width: '100%', alignItems: 'center', backgroundColor: '#000', paddingVertical: 0 }}>
                   {(() => {
                      const ratio = imageSize.width / imageSize.height || 1;
-                     // Available width in container is SCREEN_W - 32 (margins) - 2 (borders)
-                     const maxW = SCREEN_W - 34;
-                     const maxH = 350;
                      
-                     let renderW = maxW;
-                     let renderH = renderW / ratio;
+                     // Bắt buộc ảnh căng full chiều ngang
+                     const renderW = SCREEN_W;
+                     const renderH = renderW / ratio;
                      
-                     if (renderH > maxH) {
-                       renderH = maxH;
-                       renderW = renderH * ratio;
-                     }
+                     // Bỏ giới hạn chiều cao để nhường quyền vuốt (scroll) cho trang chính
+                     const containerH = renderH;
+
+                     const scaledW = renderW * imgZoom;
+                     const scaledH = renderH * imgZoom;
 
                      return (
-                       <View style={{ width: renderW, height: renderH, position: 'relative' }}>
-                         <Image 
-                           source={{ uri: capturedImage }} 
-                           style={{ width: '100%', height: '100%' }} 
-                           resizeMode="stretch" 
-                         />
-                         
-                         {/* Bounding Boxes */}
-                         <View style={{ ...StyleSheet.absoluteFillObject, pointerEvents: 'none' }}>
-                           {ocrDetails.map((detail, index) => {
-                             const box = detail.box;
-                             const xs = box.map((p: any) => p[0]);
-                             const ys = box.map((p: any) => p[1]);
-                             const minX = Math.min(...xs);
-                             const maxX = Math.max(...xs);
-                             const minY = Math.min(...ys);
-                             const maxY = Math.max(...ys);
+                       <>
+                         <PinchGestureHandler
+                           onGestureEvent={onImgPinchEvent}
+                           onHandlerStateChange={onImgPinchStateChange}
+                         >
+                           <View style={{ width: SCREEN_W, height: containerH, overflow: 'hidden' }}>
+                             <ScrollView horizontal bounces={false} showsHorizontalScrollIndicator={true} scrollEnabled={imgZoom > 1}>
+                               <ScrollView bounces={false} showsVerticalScrollIndicator={true} scrollEnabled={imgZoom > 1}>
+                                 <View style={{ width: scaledW, height: scaledH, position: 'relative' }}>
+                                   <Image 
+                                     source={{ uri: capturedImage }} 
+                                     style={{ width: '100%', height: '100%' }} 
+                                     resizeMode="stretch" 
+                                   />
+                                   
+                                   {/* Bounding Boxes */}
+                                   <View style={{ ...StyleSheet.absoluteFillObject, pointerEvents: 'none' }}>
+                                     {ocrDetails.map((detail, index) => {
+                                       const box = detail.box;
+                                       const xs = box.map((p: any) => p[0]);
+                                       const ys = box.map((p: any) => p[1]);
+                                       const minX = Math.min(...xs);
+                                       const maxX = Math.max(...xs);
+                                       const minY = Math.min(...ys);
+                                       const maxY = Math.max(...ys);
 
-                             const leftPct = (minX / imageSize.width) * 100;
-                             const topPct = (minY / imageSize.height) * 100;
-                             const widthPct = ((maxX - minX) / imageSize.width) * 100;
-                             const heightPct = ((maxY - minY) / imageSize.height) * 100;
+                                       const leftPct = (minX / imageSize.width) * 100;
+                                       const topPct = (minY / imageSize.height) * 100;
+                                       const widthPct = ((maxX - minX) / imageSize.width) * 100;
+                                       const heightPct = ((maxY - minY) / imageSize.height) * 100;
 
-                             return (
-                               <View
-                                 key={index}
-                                 style={[
-                                   styles.bbox,
-                                   {
-                                     left: `${leftPct}%`,
-                                     top: `${topPct}%`,
-                                     width: `${widthPct}%`,
-                                     height: `${heightPct}%`,
-                                   },
-                                 ]}
-                               />
-                             );
-                           })}
+                                       return (
+                                         <View
+                                           key={index}
+                                           style={[
+                                             styles.bbox,
+                                             {
+                                               left: `${leftPct}%`,
+                                               top: `${topPct}%`,
+                                               width: `${widthPct}%`,
+                                               height: `${heightPct}%`,
+                                             },
+                                           ]}
+                                         />
+                                       );
+                                     })}
+                                   </View>
+                                 </View>
+                               </ScrollView>
+                             </ScrollView>
+                           </View>
+                         </PinchGestureHandler>
+
+                         {/* Zoom Controls Overlay for Image */}
+                         <View style={{ position: 'absolute', bottom: 16, right: 16, flexDirection: 'row', backgroundColor: 'rgba(0,0,0,0.6)', borderRadius: 20, alignItems: 'center' }}>
+                           <TouchableOpacity onPress={zoomOutImg} style={{ padding: 6, paddingHorizontal: 10 }}>
+                             <Ionicons name="remove" size={18} color="#fff" />
+                           </TouchableOpacity>
+                           <Text style={{ color: '#fff', fontSize: 13, fontWeight: '700', marginHorizontal: 4 }}>
+                             {imgZoom.toFixed(1)}x
+                           </Text>
+                           <TouchableOpacity onPress={zoomInImg} style={{ padding: 6, paddingHorizontal: 10 }}>
+                             <Ionicons name="add" size={18} color="#fff" />
+                           </TouchableOpacity>
                          </View>
-                       </View>
+                       </>
                      );
                   })()}
                 </View>
