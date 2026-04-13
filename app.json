@@ -2,7 +2,7 @@
   "expo": {
     "name": "ImageToText",
     "slug": "mobile",
-    "version": "1.0.6",
+    "version": "1.0.8",
     "orientation": "portrait",
     "icon": "./assets/images/icon_1.png",
     "scheme": "mobile",
@@ -28,6 +28,7 @@
     },
     "plugins": [
       "expo-router",
+      "react-native-document-scanner-plugin",
       [
         "expo-splash-screen",
         {

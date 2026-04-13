@@ -16,7 +16,7 @@ import Constants, { ExecutionEnvironment } from 'expo-constants';
 // Nhập thử thư viện Native (sẽ null trên Expo Go)
 let DocumentScanner: any = null;
 try {
-  DocumentScanner = require('@dariyd/react-native-document-scanner').default;
+  DocumentScanner = require('react-native-document-scanner-plugin').default;
 } catch (e) {
   console.log('Không thể tải DocumentScanner Native (Expo Go)');
 }
