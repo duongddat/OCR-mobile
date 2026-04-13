@@ -44,7 +44,7 @@ export default function TabLayout() {
       <Tabs.Screen
         name="index"
         options={{
-          title: 'Scanner',
+          title: 'ScanDoc',
           tabBarIcon: ({ color, focused }) => (
             <View style={[styles.iconWrap, focused && styles.iconActive]}>
               <Ionicons name={focused ? 'scan' : 'scan-outline'} size={22} color={color} />

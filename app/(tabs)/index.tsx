@@ -215,7 +215,7 @@ export default function ScannerScreen() {
       <View style={[styles.header, { paddingTop: insets.top + 12 }]}>
         <View style={styles.headerLeft}>
           <View style={styles.headerDot} />
-          <Text style={styles.headerTitle}>AI Scanner</Text>
+          <Text style={styles.headerTitle}>AI ScanDoc</Text>
         </View>
         <Text style={styles.headerBadge}>DEEPMIND</Text>
       </View>
