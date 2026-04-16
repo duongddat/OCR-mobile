@@ -64,7 +64,13 @@ export default function HistoryScreen() {
   const renderItem = ({ item }: { item: ScanRecord }) => (
     <TouchableOpacity style={styles.card} onPress={() => setSelected(item)} activeOpacity={0.75}>
       {/* Thumbnail */}
-      <Image source={{ uri: item.imageUri }} style={styles.thumb} resizeMode="cover" />
+      {item.isPdf ? (
+        <View style={[styles.thumb, { backgroundColor: 'rgba(248,113,113,0.1)', justifyContent: 'center', alignItems: 'center' }]}>
+           <Ionicons name="document-text" size={32} color="#f87171" />
+        </View>
+      ) : (
+        <Image source={{ uri: item.imageUri }} style={styles.thumb} resizeMode="cover" />
+      )}
 
       {/* Info */}
       <View style={styles.cardInfo}>
@@ -144,8 +150,15 @@ export default function HistoryScreen() {
             </View>
 
             <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: insets.bottom + 20 }} showsVerticalScrollIndicator={false}>
-              {/* Image */}
-              <Image source={{ uri: selected.imageUri }} style={styles.modalImage} resizeMode="contain" />
+              {/* Image / PDF Preview */}
+              {selected.isPdf ? (
+                <View style={[styles.modalImage, { backgroundColor: 'rgba(248,113,113,0.05)', justifyContent: 'center', alignItems: 'center', borderWidth: 1, borderColor: 'rgba(248,113,113,0.2)' }]}>
+                  <Ionicons name="document-text" size={64} color="#f87171" />
+                  <Text style={{ color: '#f87171', marginTop: 12, fontSize: 16, fontWeight: '600' }}>Tài Liệu PDF</Text>
+                </View>
+              ) : (
+                <Image source={{ uri: selected.imageUri }} style={styles.modalImage} resizeMode="contain" />
+              )}
 
               {/* Meta */}
               <View style={styles.modalMeta}>
