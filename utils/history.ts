@@ -10,11 +10,19 @@ export interface ScanRecord {
   wordCount: number;
   createdAt: string; // ISO string
   isPdf?: boolean;
+  ocrDetails?: any[];
+  imageSize?: { width: number; height: number };
 }
 
 let memoryStorage: ScanRecord[] | null = null;
 
-export async function saveToHistory(imageUri: string, text: string, isPdf: boolean = false): Promise<void> {
+export async function saveToHistory(
+  imageUri: string, 
+  text: string, 
+  isPdf: boolean = false,
+  ocrDetails: any[] = [],
+  imageSize: { width: number; height: number } = { width: 1, height: 1 }
+): Promise<void> {
   try {
     const existing = await loadHistory();
     const record: ScanRecord = {
@@ -24,6 +32,8 @@ export async function saveToHistory(imageUri: string, text: string, isPdf: boole
       wordCount: text.trim().split(/\s+/).filter(Boolean).length,
       createdAt: new Date().toISOString(),
       isPdf,
+      ocrDetails,
+      imageSize,
     };
     const updated = [record, ...existing].slice(0, MAX_ITEMS);
     
