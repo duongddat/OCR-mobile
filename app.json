@@ -1,13 +1,13 @@
 {
   "expo": {
-    "name": "ImageToText",
+    "name": "ScanDoc",
     "slug": "mobile",
-    "version": "1.1.0",
+    "version": "1.1.2",
     "orientation": "portrait",
     "icon": "./assets/images/icon_1.png",
     "scheme": "mobile",
     "userInterfaceStyle": "automatic",
-    "newArchEnabled": true,
+    "newArchEnabled": false,
     "ios": {
       "supportsTablet": true
     },
@@ -45,8 +45,8 @@
         "expo-build-properties",
         {
           "android": {
-            "enableProguardInReleaseBuilds": true,
-            "enableShrinkResourcesInReleaseBuilds": true,
+            "enableProguardInReleaseBuilds": false,
+            "enableShrinkResourcesInReleaseBuilds": false,
             "useLegacyPackaging": false
           }
         }
