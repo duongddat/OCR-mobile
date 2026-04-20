@@ -11,7 +11,7 @@ import Animated, {
 import type { SharedValue } from 'react-native-reanimated';
 import { Canvas, Path } from '@shopify/react-native-skia';
 import * as ImageManipulator from 'expo-image-manipulator';
-import * as FileSystem from 'expo-file-system/legacy';
+import * as FileSystem from 'expo-file-system';
 import { OpenCV, ColorConversionCodes, AdaptiveThresholdTypes, ThresholdTypes } from 'react-native-fast-opencv';
 import { ACCENT } from './styles';
 
