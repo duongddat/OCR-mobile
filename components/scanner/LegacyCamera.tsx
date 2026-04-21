@@ -19,7 +19,7 @@ type Props = {
 
 export default function LegacyCamera({
   insetsBottom, cameraRef, facing, setFacing,
-  closeLegacyCamera, takeLegacyPicture, pickImage, pickPdf
+  closeLegacyCamera, takeLegacyPicture, pickImage, pickPdf,
 }: Props) {
   // Local zoom state
   const [zoom, setZoom] = useState(0);
@@ -52,7 +52,7 @@ export default function LegacyCamera({
         <TouchableOpacity style={styles.zoomBtn} onPress={zoomOut}><Ionicons name="remove" size={24} color="#fff" /></TouchableOpacity>
       </View>
 
-      <View style={[styles.camControls, { paddingBottom: insetsBottom + 80 }]}>
+      <View style={[styles.camControls, { paddingBottom: insetsBottom + 10 }]}>
         <TouchableOpacity style={styles.ctrlBtn} onPress={pickImage}>
           <Ionicons name="images-outline" size={24} color="#fff" />
         </TouchableOpacity>

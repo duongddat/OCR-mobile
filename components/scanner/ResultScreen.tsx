@@ -5,7 +5,7 @@ import {
 } from 'react-native';
 import { PinchGestureHandler, State } from 'react-native-gesture-handler';
 import { Ionicons } from '@expo/vector-icons';
-import { BlurView } from 'expo-blur';
+
 import { ACCENT, BG, SURFACE, BORDER } from './styles';
 
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
@@ -72,16 +72,12 @@ type Props = {
   imageSize: { width: number; height: number };
   ocrDetails: any[];
   ocrText: string;
-  setOcrText: (t: string) => void;
-  copied: boolean;
-  copyText: () => void;
   resetScanner: () => void;
 };
 
 export default function ResultScreen({
   insetsBottom, isPdf, pdfFileName, totalPages, capturedImage,
-  imageSize, ocrDetails, ocrText, setOcrText,
-  copied, copyText, resetScanner,
+  imageSize, ocrDetails, ocrText, resetScanner,
 }: Props) {
   const [imgZoom, setImgZoom] = useState(1);
   const baseImgZoom = useRef(1);

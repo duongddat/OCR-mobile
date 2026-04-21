@@ -1,6 +1,4 @@
-import { StyleSheet, Dimensions } from 'react-native';
-
-const { width: SCREEN_W } = Dimensions.get('window');
+import { StyleSheet } from 'react-native';
 
 export const ACCENT = '#06b6d4';
 export const BG = '#09090b';
@@ -52,7 +50,7 @@ export const styles = StyleSheet.create({
     backgroundColor: 'rgba(255,255,255,0.05)', borderRadius: 12,
   },
   secondaryActionText: { color: '#a1a1aa', fontSize: 15, fontWeight: '600' },
-  
+
   expoWarning: {
     marginTop: 40, padding: 16, backgroundColor: 'rgba(251,191,36,0.1)',
     borderWidth: 1, borderColor: 'rgba(251,191,36,0.2)', borderRadius: 12,
