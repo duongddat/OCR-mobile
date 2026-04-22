@@ -30,7 +30,7 @@ function TextResultPopup({
           <TouchableOpacity style={rS.popupBackBtn} onPress={onClose}>
             <Ionicons name="arrow-back" size={24} color="#fff" />
           </TouchableOpacity>
-          <Text style={rS.popupTitleCenter}>Kết quả Text</Text>
+          <Text style={rS.popupTitleCenter}>Kết quả văn bản</Text>
           {/* Spacer for centering */}
           <View style={{ width: 44 }} />
         </View>

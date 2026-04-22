@@ -12,6 +12,7 @@ import * as DocumentPicker from 'expo-document-picker';
 import Constants, { ExecutionEnvironment } from 'expo-constants';
 import { Ionicons } from '@expo/vector-icons';
 
+import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
 import { saveToHistory, loadHistory, deleteRecord, clearHistory, formatDate, ScanRecord } from '@/utils/history';
 import { styles, ACCENT } from '@/components/scanner/styles';
 
@@ -19,7 +20,8 @@ import PermissionScreen from '@/components/scanner/PermissionScreen';
 import LegacyCamera from '@/components/scanner/LegacyCamera';
 import ProcessingScreen from '@/components/scanner/ProcessingScreen';
 import ResultScreen from '@/components/scanner/ResultScreen';
-import { launchMlKitDocumentScanner, recognizeTextWithMlKit } from '@/utils/mlkit';
+import CustomScanner from '@/components/scanner/CustomScanner';
+import { recognizeTextWithMlKit } from '@/utils/mlkit';
 import type { OcrEngine } from '@/utils/mlkit';
 
 // Native DocumentScanner — null on Expo Go
@@ -64,6 +66,7 @@ export default function ScannerScreen() {
   const [pdfFileName, setPdfFileName] = useState('');
   const [totalPages, setTotalPages] = useState(0);
   const [useLegacyCamera, setUseLegacyCamera] = useState(false);
+  const [useCustomScanner, setUseCustomScanner] = useState(false);
 
   // History State
   const [records, setRecords] = useState<ScanRecord[]>([]);
@@ -180,7 +183,7 @@ export default function ScannerScreen() {
     if (isExpoGo) {
       Alert.alert(
         'Chế Độ Expo Go',
-        'ML Kit cần native build nên không chạy trên Expo Go. Bạn có muốn sử dụng Camera thường không?',
+        'Camera Native cần build nên không chạy trên Expo Go. Bạn có muốn sử dụng Camera thường không?',
         [
           { text: 'Huỷ', style: 'cancel' },
           { text: 'Mở Camera Thường', onPress: () => setUseLegacyCamera(true) },
@@ -190,31 +193,20 @@ export default function ScannerScreen() {
     }
 
     try {
-      let scannedUri: string | null = null;
-
-      if (Platform.OS === 'android') {
-        try {
-          const mlKitScanResult = await launchMlKitDocumentScanner();
-          if (mlKitScanResult?.canceled) {
-            return;
-          }
-          scannedUri = mlKitScanResult?.pages?.[0] ?? null;
-        } catch (error) {
-          console.warn('ML Kit document scanner unavailable, fallback to native scanner plugin:', error);
-        }
-      }
-
-      if (!scannedUri) {
-        return;
-      }
-
-      setUseLegacyCamera(false);
-      setIsPdf(false);
-      setCapturedImage(scannedUri);
-      await recognizeImage(scannedUri);
+      setUseCustomScanner(true);
     } catch {
-      Alert.alert('Lỗi', 'Không thể khởi động trình quét tài liệu bằng ML Kit.');
+      Alert.alert('Lỗi', 'Không thể khởi động trình quét tài liệu.');
     }
+  };
+
+  const handleCustomScannerCapture = async (uri: string, corners?: any[]) => {
+    setUseCustomScanner(false);
+    // Tạm thời bỏ qua màn hình crop 4 góc (CropEditor) cho bản demo
+    // Feed vào hệ thống OCR hiện tại
+    setUseLegacyCamera(false);
+    setIsPdf(false);
+    setCapturedImage(uri);
+    await recognizeImage(uri);
   };
 
   const takeLegacyPicture = async () => {
@@ -273,15 +265,28 @@ export default function ScannerScreen() {
     setTotalPages(0);
     setOcrEngine('backend');
 
-    // Chuẩn hóa URI trên Android để fetch FormData không bị lỗi 'Network request failed'
-    const normalizedUri = Platform.OS === 'android' && !uri.startsWith('file://') && !uri.startsWith('content://') && uri.startsWith('/') 
-      ? `file://${uri}` 
-      : uri;
+    // ─ Auto-rotate image based on EXIF before uploading ─────────────────────
+    // manipulateAsync with an empty actions array bakes the EXIF rotation
+    // into the pixel data, producing an upright image the BE can read
+    let finalUri = uri;
+    if (!isPdfFlag) {
+      try {
+        const rotated = await manipulateAsync(uri, [], { format: SaveFormat.JPEG, compress: 0.92 });
+        finalUri = rotated.uri;
+      } catch (rotErr) {
+        console.warn('[uploadToServer] rotate step failed, using original uri:', rotErr);
+      }
+    }
+
+    // Chuẩn hóa URI trên Android
+    const normalizedUri = Platform.OS === 'android' && !finalUri.startsWith('file://') && !finalUri.startsWith('content://') && finalUri.startsWith('/')
+      ? `file://${finalUri}`
+      : finalUri;
 
     try {
-      let filename = originalName ?? (uri.split('/').pop() ?? 'file.jpg');
+      let filename = originalName ?? (finalUri.split('/').pop() ?? 'file.jpg');
       if (!filename.includes('.')) filename += '.jpg';
-      
+
       const type = isPdfFlag
         ? 'application/pdf'
         : (() => { const m = /\.(\w+)$/.exec(filename); return m ? `image/${m[1]}` : 'image/jpeg'; })();
@@ -306,7 +311,16 @@ export default function ScannerScreen() {
       const json = await response.json();
 
       if (json.status === 'success') {
-        setOcrText(json.text);
+        // Guard: treat empty text as an error so we never enter a blank-screen limbo
+        const resultText = (json.text ?? '').trim();
+        if (!resultText) {
+          setOcrText('⚠️')  // sentinel — triggers empty-result UI (see STATE 3.5)
+          setOcrDetails([]);
+          setImageSize(json.imageSize ?? { width: 1, height: 1 });
+          return;
+        }
+
+        setOcrText(resultText);
         setOcrDetails(json.details ?? []);
         setImageSize(json.imageSize ?? { width: 1, height: 1 });
         if (json.pages) setTotalPages(json.pages);
@@ -318,7 +332,7 @@ export default function ScannerScreen() {
         }
         await saveToHistory(
           savedImageUri,
-          json.text,
+          resultText,
           isPdfFlag,
           json.details ?? [],
           json.imageSize ?? { width: 1, height: 1 },
@@ -326,10 +340,10 @@ export default function ScannerScreen() {
         );
         loadHistory().then(setRecords);
       } else {
-        setOcrText('Lỗi: ' + (json.message ?? 'Không nhận dạng được văn bản.'));
+        setOcrText('⚠️ Lỗi: ' + (json.message ?? 'Không nhận dạng được văn bản.'));
       }
     } catch (e: any) {
-      setOcrText(`Lỗi kết nối: Không thể truy cập Backend.\nURI gốc: ${uri}\nURI đã chuẩn hóa: ${normalizedUri}\nChi tiết: ${e.message || e}`);
+      setOcrText(`⚠️ Lỗi kết nối: Không thể truy cập Backend.\n${e.message || e}`);
     } finally {
       setIsProcessing(false);
     }
@@ -338,7 +352,7 @@ export default function ScannerScreen() {
   const resetScanner = () => {
     setCapturedImage(null); setOcrText(''); setOcrDetails([]);
     setImageSize({ width: 1, height: 1 }); setOcrEngine('backend');
-    setUseLegacyCamera(false); setIsPdf(false);
+    setUseLegacyCamera(false); setIsPdf(false); setUseCustomScanner(false);
     setPdfFileName(''); setTotalPages(0);
   };
 
@@ -375,7 +389,7 @@ export default function ScannerScreen() {
       <StatusBar barStyle="light-content" />
 
       {/* Header — only on home screen */}
-      {!useLegacyCamera && !capturedImage && !isPdf && (
+      {!useLegacyCamera && !useCustomScanner && !capturedImage && !isPdf && (
         <View style={[styles.header, { paddingTop: insets.top + 12 }]}>
           <View style={styles.headerLeft}>
             <View style={styles.headerDot} />
@@ -392,7 +406,7 @@ export default function ScannerScreen() {
 
       <View style={styles.content}>
         {/* STATE 0: History List */}
-        {!capturedImage && !useLegacyCamera && !isPdf && (
+        {!capturedImage && !useLegacyCamera && !useCustomScanner && !isPdf && (
           <View style={{ flex: 1 }}>
             {records.length === 0 ? (
               <View style={sb.empty}>
@@ -448,8 +462,16 @@ export default function ScannerScreen() {
           </View>
         )}
 
+        {/* STATE 0.5: Custom Scanner */}
+        {useCustomScanner && !capturedImage && !isPdf && (
+           <CustomScanner 
+             onCapture={handleCustomScannerCapture} 
+             onCancel={() => setUseCustomScanner(false)} 
+           />
+        )}
+
         {/* STATE 1: Legacy Camera */}
-        {!capturedImage && useLegacyCamera && !isPdf && (
+        {!capturedImage && useLegacyCamera && !useCustomScanner && !isPdf && (
           <LegacyCamera
             insetsBottom={insets.bottom}
             cameraRef={cameraRef}
@@ -467,8 +489,53 @@ export default function ScannerScreen() {
           <ProcessingScreen isPdf={isPdf} />
         )}
 
+        {/* STATE 3.5: Empty result after processing — prevents blank screen */}
+        {(capturedImage || isPdf) && !isProcessing && ocrText === '\u26a0\ufe0f' && (
+          <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', padding: 32, backgroundColor: BG }}>
+            <View style={{
+              backgroundColor: SURFACE, borderRadius: 24, padding: 32,
+              alignItems: 'center', gap: 16, borderWidth: 1, borderColor: BORDER, width: '100%',
+            }}>
+              <View style={{
+                width: 72, height: 72, borderRadius: 36,
+                backgroundColor: 'rgba(251,191,36,0.12)',
+                justifyContent: 'center', alignItems: 'center',
+              }}>
+                <Ionicons name="alert-circle" size={36} color="#fbbf24" />
+              </View>
+              <Text style={{ color: '#fff', fontSize: 18, fontWeight: '800', textAlign: 'center' }}>
+                Không nhận dạng được chữ
+              </Text>
+              <Text style={{ color: '#a1a1aa', fontSize: 14, lineHeight: 22, textAlign: 'center' }}>
+                {'Ảnh có thể bị nghiêng, mờ hoặc không có văn bản.\nHãy thử lại với ảnh rõ hơn.'}
+              </Text>
+              <TouchableOpacity
+                style={{
+                  backgroundColor: ACCENT, borderRadius: 16, paddingVertical: 14,
+                  paddingHorizontal: 32, width: '100%', alignItems: 'center',
+                }}
+                onPress={() => {
+                  if (capturedImage) uploadToServer(capturedImage, isPdf);
+                }}
+              >
+                <Text style={{ color: '#0a0a0d', fontSize: 15, fontWeight: '800' }}>Thử lại</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={{
+                  borderRadius: 16, paddingVertical: 14, paddingHorizontal: 32,
+                  width: '100%', alignItems: 'center',
+                  borderWidth: 1, borderColor: BORDER,
+                }}
+                onPress={resetScanner}
+              >
+                <Text style={{ color: '#a1a1aa', fontSize: 15, fontWeight: '600' }}>← Quay lại</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        )}
+
         {/* STATE 3: Results */}
-        {(capturedImage || isPdf) && !isProcessing && ocrText !== '' && (
+        {(capturedImage || isPdf) && !isProcessing && ocrText !== '' && ocrText !== '\u26a0\ufe0f' && (
           <ResultScreen
             insetsBottom={insets.bottom}
             isPdf={isPdf}
