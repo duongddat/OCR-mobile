@@ -17,6 +17,7 @@ import Animated, {
   useSharedValue,
   useAnimatedStyle,
   SharedValue,
+  useDerivedValue,
 } from 'react-native-reanimated';
 import { Canvas, Path, Skia } from '@shopify/react-native-skia';
 import { Ionicons } from '@expo/vector-icons';
@@ -227,14 +228,12 @@ export default function CropEditor({
     }
   }, [displayRect]);
 
-  const [path, setPath] = React.useState(() =>
-    buildPath(tl.value, tr.value, br.value, bl.value),
-  );
-  React.useEffect(() => {
-    const id = setInterval(() => {
-      setPath(buildPath(tl.value, tr.value, br.value, bl.value));
-    }, 16);
-    return () => clearInterval(id);
+  const path = useDerivedValue(() => {
+    const p = Skia.Path.Make();
+    p.moveTo(tl.value.x, tl.value.y); p.lineTo(tr.value.x, tr.value.y);
+    p.lineTo(br.value.x, br.value.y); p.lineTo(bl.value.x, bl.value.y);
+    p.close();
+    return p;
   }, [tl, tr, br, bl]);
 
   /**

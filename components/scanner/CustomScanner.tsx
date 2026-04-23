@@ -319,8 +319,8 @@ export default function CustomScanner({ onCapture, onCancel }: CustomScannerProp
     frameAspect?: number;
   } | null>(null);
 
-  // ✅ FIX: zoom as React state — replaces animatedProps on ReanimatedCamera
   const [zoom, setZoom] = useState(device?.minZoom ?? 1);
+  const [frameAspect, setFrameAspect] = useState(1);
  
   // Refs
   const cameraRef        = useRef<CameraRef>(null);
@@ -348,11 +348,12 @@ export default function CustomScanner({ onCapture, onCancel }: CustomScannerProp
     (z) => runOnJS(setZoom)(z),
   );
 
-  // Focus Ring
+  // Focus Ring shared values
   const tapFocusX    = useSharedValue(0);
   const tapFocusY    = useSharedValue(0);
   const focusOpacity = useSharedValue(0);
   const focusScale   = useSharedValue(1);
+  const focusRingColor = useSharedValue('#34d399'); // green = manual tap, cyan = auto-doc focus
  
   const progressY = useDerivedValue(() => {
     const h = docMaxY.value - docMinY.value;
@@ -400,8 +401,9 @@ export default function CustomScanner({ onCapture, onCancel }: CustomScannerProp
   }, [isStable, mode, isActive, hasAutoShot]);
  
   // ── Corner update + stability detection + SMART FOCUS ─────────────────
-  const onCornersDetected = useCallback((corners: DocCorners | null) => {
+  const onCornersDetected = useCallback((corners: DocCorners | null, aspect: number) => {
     setDetectedCorners(corners);
+    setFrameAspect(aspect);
  
     const now      = Date.now();
     const canFocus = now - lastFocusTimeRef.current > FOCUS_THROTTLE;
@@ -422,7 +424,7 @@ export default function CustomScanner({ onCapture, onCancel }: CustomScannerProp
       return;
     }
  
-    const sc = normalizedToScreenCorners(corners, frameAspectShared.value);
+    const sc = normalizedToScreenCorners(corners, aspect);
     docMinY.value = Math.min(sc.tl.y, sc.tr.y, sc.bl.y, sc.br.y);
     docMaxY.value = Math.max(sc.tl.y, sc.tr.y, sc.bl.y, sc.br.y);
  
@@ -432,6 +434,15 @@ export default function CustomScanner({ onCapture, onCancel }: CustomScannerProp
       const safeX = Math.max(1, Math.min(SCREEN_W - 1, fx));
       const safeY = Math.max(1, Math.min(SCREEN_H - 1, fy));
       cameraRef.current.focusTo({ x: safeX, y: safeY }).catch(() => {});
+
+      // ✅ FIX: Hiển thị focus ring tại tâm tài liệu khi auto-focus
+      tapFocusX.value = safeX;
+      tapFocusY.value = safeY;
+      focusRingColor.value = '#06b6d4'; // cyan = auto-focus tài liệu
+      focusOpacity.value = 1;
+      focusScale.value = 1.4;
+      focusScale.value = withTiming(1, { duration: 350 });
+      focusOpacity.value = withTiming(0, { duration: 1000 });
     }
  
     const prev  = prevCornersRef.current;
@@ -454,7 +465,7 @@ export default function CustomScanner({ onCapture, onCancel }: CustomScannerProp
     }
  
     prevCornersRef.current = corners;
-  }, []);
+  }, [tapFocusX, tapFocusY, focusOpacity, focusScale, focusRingColor]);
 
   // ── Gestures ──────────────────────────────────────────────────────────
   const handleManualFocus = useCallback((x: number, y: number) => {
@@ -467,6 +478,7 @@ export default function CustomScanner({ onCapture, onCancel }: CustomScannerProp
   const singleTap = Gesture.Tap().onEnd((e) => {
     tapFocusX.value = e.x;
     tapFocusY.value = e.y;
+    focusRingColor.value = '#34d399'; // green = tap thủ công
     focusOpacity.value = 1;
     focusScale.value = 1.3;
     focusScale.value = withTiming(1, { duration: 300 });
@@ -489,11 +501,13 @@ export default function CustomScanner({ onCapture, onCancel }: CustomScannerProp
 
   const cameraGestures = Gesture.Simultaneous(pinchGesture, Gesture.Exclusive(doubleTap, singleTap));
 
+  // Focus Ring color: cyan for auto-doc focus, green for manual tap
   const focusRingStyle = useAnimatedStyle(() => ({
     opacity: focusOpacity.value,
     transform: [{ scale: focusScale.value }],
     left: tapFocusX.value - 35,
     top: tapFocusY.value - 35,
+    borderColor: focusRingColor.value,
   }));
  
   // ── Frame processor ────────────────────────────────────────────────────
@@ -518,11 +532,11 @@ export default function CustomScanner({ onCapture, onCancel }: CustomScannerProp
         const src = OpenCV.bufferToMat('uint8', frame.height, frame.width, channels, uint8);
         const corners = detectDocument(src, frame.width, frame.height, channels);
  
-        runOnJS(onCornersDetected)(corners);
+        runOnJS(onCornersDetected)(corners, frameAspectShared.value);
         OpenCV.releaseBuffers([src.id]);
       } catch (e: any) {
         console.log('[WORKLET] onFrame error:', e?.message ?? e);
-        runOnJS(onCornersDetected)(null);
+        runOnJS(onCornersDetected)(null, frameAspectShared.value);
       } finally {
         frame.dispose();
       }
@@ -576,7 +590,7 @@ export default function CustomScanner({ onCapture, onCancel }: CustomScannerProp
  
   // Skia overlay
   const screenCorners = detectedCorners
-    ? normalizedToScreenCorners(detectedCorners, frameAspectShared.value)
+    ? normalizedToScreenCorners(detectedCorners, frameAspect)
     : null;
   const skPath      = screenCorners ? buildPolygonPath(screenCorners) : null;
   const strokeColor = isStable && mode === 'auto' ? '#34d399' : '#06b6d4';
@@ -654,7 +668,6 @@ export default function CustomScanner({ onCapture, onCancel }: CustomScannerProp
               width: 70, height: 70,
               borderRadius: 35,
               borderWidth: 1.5,
-              borderColor: '#34d399',
             }, focusRingStyle]}
           />
         </View>
