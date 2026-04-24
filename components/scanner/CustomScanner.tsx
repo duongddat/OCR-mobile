@@ -4,7 +4,6 @@ import {
   View,
   Text,
   TouchableOpacity,
-  Dimensions,
 } from 'react-native';
 import {
   Camera,
@@ -26,7 +25,7 @@ import {
   useAnimatedReaction,
 } from 'react-native-reanimated';
 import Animated from 'react-native-reanimated';
-import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler';
+import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -42,10 +41,8 @@ import * as FileSystem from 'expo-file-system/legacy';
 import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
 import CropEditor from './CropEditor';
  
-const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
- 
 const MIN_AREA_RATIO = 0.08;
-const FOCUS_THROTTLE = 1200; // ms between camera.focus() calls
+const FOCUS_THROTTLE = 1000; // ms between camera.focus() calls
  
 // ─── Types ────────────────────────────────────────────────────────────────
  
@@ -63,10 +60,11 @@ interface CustomScannerProps {
  
 // ─── Smart focus point ────────────────────────────────────────────────────
  
-function getDocumentFocusPoint(c: DocCorners): { x: number; y: number } {
+function getDocumentFocusPoint(c: DocCorners, frameAspect: number, screenW: number, screenH: number): { x: number; y: number } {
+  const sc = normalizedToScreenCorners(c, frameAspect, screenW, screenH);
   return {
-    x: ((c.tl.x + c.tr.x + c.br.x + c.bl.x) / 4) * SCREEN_W,
-    y: ((c.tl.y + c.tr.y + c.br.y + c.bl.y) / 4) * SCREEN_H,
+    x: (sc.tl.x + sc.tr.x + sc.br.x + sc.bl.x) / 4,
+    y: (sc.tl.y + sc.tr.y + sc.br.y + sc.bl.y) / 4,
   };
 }
  
@@ -80,7 +78,7 @@ function detectDocument(
 ): DocCorners | null {
   'worklet';
   const ids: string[] = [];
-  const cleanup = () => { try { OpenCV.clearBuffers(ids); } catch {} };
+  const cleanup = () => { try { OpenCV.releaseBuffers(ids); } catch {} };
  
   try {
     const gray = OpenCV.createObject('mat' as ObjectType.Mat, imgH, imgW, 0);
@@ -89,13 +87,13 @@ function detectDocument(
  
     const blurred = OpenCV.createObject('mat' as ObjectType.Mat, imgH, imgW, 0);
     ids.push(blurred.id);
-    const ksize = OpenCV.createObject('size' as ObjectType.Size, 5, 5);
+    const ksize = OpenCV.createObject('size' as ObjectType.Size, 7, 7);
     ids.push(ksize.id);
     OpenCV.invoke('GaussianBlur', gray, blurred, ksize, 0);
  
     const edges = OpenCV.createObject('mat' as ObjectType.Mat, imgH, imgW, 0);
     ids.push(edges.id);
-    OpenCV.invoke('Canny', blurred, edges, 30, 100);
+    OpenCV.invoke('Canny', blurred, edges, 50, 150);
  
     const kernel = OpenCV.invoke(
       'getStructuringElement',
@@ -132,7 +130,7 @@ function detectDocument(
       const peri = (OpenCV.invoke('arcLength', contour, true) as { value: number }).value;
       const approx = OpenCV.createObject('mat' as ObjectType.Mat, 0, 0, 0);
       ids.push(approx.id);
-      OpenCV.invoke('approxPolyDP', contour, approx, 0.04 * peri, true);
+      OpenCV.invoke('approxPolyDP', contour, approx, 0.02 * peri, true);
  
       const buf    = OpenCV.matToBuffer(approx, 'int32');
       const numPts = buf.rows * buf.cols;
@@ -172,7 +170,7 @@ function detectDocumentJS(
   channels = 3,
 ): DocCorners | null {
   const ids: string[] = [];
-  const cleanup = () => { try { OpenCV.clearBuffers(ids); } catch {} };
+  const cleanup = () => { try { OpenCV.releaseBuffers(ids); } catch {} };
  
   try {
     const gray = OpenCV.createObject('mat' as ObjectType.Mat, imgH, imgW, 0);
@@ -181,13 +179,13 @@ function detectDocumentJS(
  
     const blurred = OpenCV.createObject('mat' as ObjectType.Mat, imgH, imgW, 0);
     ids.push(blurred.id);
-    const ksize = OpenCV.createObject('size' as ObjectType.Size, 5, 5);
+    const ksize = OpenCV.createObject('size' as ObjectType.Size, 7, 7);
     ids.push(ksize.id);
     OpenCV.invoke('GaussianBlur', gray, blurred, ksize, 0);
  
     const edges = OpenCV.createObject('mat' as ObjectType.Mat, imgH, imgW, 0);
     ids.push(edges.id);
-    OpenCV.invoke('Canny', blurred, edges, 30, 100);
+    OpenCV.invoke('Canny', blurred, edges, 50, 150);
  
     const kernel = OpenCV.invoke(
       'getStructuringElement',
@@ -224,7 +222,7 @@ function detectDocumentJS(
       const peri = (OpenCV.invoke('arcLength', contour, true) as { value: number }).value;
       const approx = OpenCV.createObject('mat' as ObjectType.Mat, 0, 0, 0);
       ids.push(approx.id);
-      OpenCV.invoke('approxPolyDP', contour, approx, 0.04 * peri, true);
+      OpenCV.invoke('approxPolyDP', contour, approx, 0.02 * peri, true);
  
       const buf    = OpenCV.matToBuffer(approx, 'int32');
       const numPts = buf.rows * buf.cols;
@@ -257,24 +255,38 @@ function detectDocumentJS(
  
 // ─── Helpers ──────────────────────────────────────────────────────────────
  
-function normalizedToScreenCorners(c: DocCorners, frameAspect: number) {
-  const screenAspect = SCREEN_W / SCREEN_H;
-  let displayW = SCREEN_W, displayH = SCREEN_H, offsetX = 0, offsetY = 0;
+function normalizedToScreenCorners(c: DocCorners, frameAspect: number, screenW: number, screenH: number) {
+  const screenAspect = screenW / screenH;
+  const frameIsLandscape = frameAspect > 1;
+  const screenIsPortrait = screenW < screenH;
+  const needsRotation = frameIsLandscape && screenIsPortrait;
+
+  const effectiveAspect = needsRotation ? 1 / frameAspect : frameAspect;
+
+  let displayW = screenW, displayH = screenH, offsetX = 0, offsetY = 0;
  
-  if (frameAspect > screenAspect) {
-    displayH = SCREEN_H;
-    displayW = SCREEN_H * frameAspect;
-    offsetX  = (SCREEN_W - displayW) / 2;
+  if (effectiveAspect > screenAspect) {
+    displayH = screenH;
+    displayW = screenH * effectiveAspect;
+    offsetX  = (screenW - displayW) / 2;
   } else {
-    displayW = SCREEN_W;
-    displayH = SCREEN_W / frameAspect;
-    offsetY  = (SCREEN_H - displayH) / 2;
+    displayW = screenW;
+    displayH = screenW / effectiveAspect;
+    offsetY  = (screenH - displayH) / 2;
   }
  
-  const map = (p: { x: number; y: number }) => ({
-    x: p.x * displayW + offsetX,
-    y: p.y * displayH + offsetY,
-  });
+  const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
+
+  const map = needsRotation
+    ? (p: { x: number; y: number }) => ({
+        x: clamp(p.y * displayW + offsetX, 0, screenW),
+        y: clamp((1 - p.x) * displayH + offsetY, 0, screenH),
+      })
+    : (p: { x: number; y: number }) => ({
+        x: clamp(p.x * displayW + offsetX, 0, screenW),
+        y: clamp(p.y * displayH + offsetY, 0, screenH),
+      });
+
   return { tl: map(c.tl), tr: map(c.tr), br: map(c.br), bl: map(c.bl) };
 }
  
@@ -301,7 +313,10 @@ function buildDotPath(x: number, y: number, r = 7) {
  
 // ─── Component ────────────────────────────────────────────────────────────
  
+import { useWindowDimensions } from 'react-native';
+
 export default function CustomScanner({ onCapture, onCancel }: CustomScannerProps) {
+  const { width: SCREEN_W, height: SCREEN_H } = useWindowDimensions();
   const device = useCameraDevice('back');
   const insets = useSafeAreaInsets();
   const { hasPermission, requestPermission } = useCameraPermission();
@@ -334,7 +349,7 @@ export default function CustomScanner({ onCapture, onCancel }: CustomScannerProp
   const frameAspectShared  = useSharedValue(1);
   const fillAnim           = useSharedValue(0);
   const docMinY            = useSharedValue(0);
-  const docMaxY            = useSharedValue(SCREEN_H);
+  const docMaxY            = useSharedValue(2000); // placeholder, updated in render
 
   // Zoom shared values (for pinch gesture on UI thread)
   const minZoom   = device?.minZoom ?? 1;
@@ -381,11 +396,10 @@ export default function CustomScanner({ onCapture, onCancel }: CustomScannerProp
     if (stableTimerRef.current) { clearTimeout(stableTimerRef.current); stableTimerRef.current = null; }
   }, [mode]);
  
-  // Progress animation
   useEffect(() => {
     if (isStable && mode === 'auto') {
       fillAnim.value = 0;
-      fillAnim.value = withTiming(1, { duration: 900, easing: Easing.linear });
+      fillAnim.value = withTiming(1, { duration: 600, easing: Easing.linear });
     } else {
       cancelAnimation(fillAnim);
       fillAnim.value = 0;
@@ -395,7 +409,7 @@ export default function CustomScanner({ onCapture, onCancel }: CustomScannerProp
   // Auto-capture trigger
   useEffect(() => {
     if (isStable && mode === 'auto' && isActive && !hasAutoShot) {
-      const t = setTimeout(() => { setHasAutoShot(true); capturePhoto(); }, 900);
+      const t = setTimeout(() => { setHasAutoShot(true); capturePhoto(); }, 600);
       return () => clearTimeout(t);
     }
   }, [isStable, mode, isActive, hasAutoShot]);
@@ -424,13 +438,13 @@ export default function CustomScanner({ onCapture, onCancel }: CustomScannerProp
       return;
     }
  
-    const sc = normalizedToScreenCorners(corners, aspect);
+    const sc = normalizedToScreenCorners(corners, aspect, SCREEN_W, SCREEN_H);
     docMinY.value = Math.min(sc.tl.y, sc.tr.y, sc.bl.y, sc.br.y);
     docMaxY.value = Math.max(sc.tl.y, sc.tr.y, sc.bl.y, sc.br.y);
  
     if (canFocus && cameraRef.current) {
       lastFocusTimeRef.current = now;
-      const { x: fx, y: fy } = getDocumentFocusPoint(corners);
+      const { x: fx, y: fy } = getDocumentFocusPoint(corners, aspect, SCREEN_W, SCREEN_H);
       const safeX = Math.max(1, Math.min(SCREEN_W - 1, fx));
       const safeY = Math.max(1, Math.min(SCREEN_H - 1, fy));
       cameraRef.current.focusTo({ x: safeX, y: safeY }).catch(() => {});
@@ -448,12 +462,12 @@ export default function CustomScanner({ onCapture, onCancel }: CustomScannerProp
     const prev  = prevCornersRef.current;
     const moved = prev ? cornersDistance(prev, corners) : Infinity;
  
-    if (moved < 0.015) {
+    if (moved < 0.035) {
       if (!stableTimerRef.current) {
         stableTimerRef.current = setTimeout(() => {
           setIsStable(true);
           stableTimerRef.current = null;
-        }, 600);
+        }, 400);
       }
     } else {
       setIsStable(false);
@@ -513,16 +527,17 @@ export default function CustomScanner({ onCapture, onCancel }: CustomScannerProp
   // ── Frame processor ────────────────────────────────────────────────────
   const frameOutput = useFrameOutput({
     pixelFormat: 'rgb',
-    enablePhysicalBufferRotation: true,
+    // enablePhysicalBufferRotation removed: frame ở landscape gây offsetX âm lớn, polygon vẽ ngoài màn hình
     onFrame: (frame) => {
       'worklet';
       if (!isActiveShared.value) { frame.dispose(); return; }
  
-      frameCounterShared.value = (frameCounterShared.value + 1) % 12;
+      frameCounterShared.value = (frameCounterShared.value + 1) % 4;
       if (frameCounterShared.value !== 0) { frame.dispose(); return; }
  
       frameAspectShared.value = frame.width / frame.height;
  
+      let srcId: string | null = null;
       try {
         const buffer   = frame.getPixelBuffer();
         const uint8    = new Uint8Array(buffer);
@@ -530,14 +545,17 @@ export default function CustomScanner({ onCapture, onCancel }: CustomScannerProp
         const channels: 1|3|4 = (calcCh === 1 || calcCh === 3 || calcCh === 4) ? calcCh : 4;
  
         const src = OpenCV.bufferToMat('uint8', frame.height, frame.width, channels, uint8);
+        srcId = src.id;
         const corners = detectDocument(src, frame.width, frame.height, channels);
  
         runOnJS(onCornersDetected)(corners, frameAspectShared.value);
-        OpenCV.releaseBuffers([src.id]);
       } catch (e: any) {
-        console.log('[WORKLET] onFrame error:', e?.message ?? e);
+        console.log('[WORKLET] onFrame error:', e?.message || 'Unknown error');
         runOnJS(onCornersDetected)(null, frameAspectShared.value);
       } finally {
+        if (srcId) {
+          try { OpenCV.releaseBuffers([srcId]); } catch {}
+        }
         frame.dispose();
       }
     },
@@ -566,11 +584,18 @@ export default function CustomScanner({ onCapture, onCancel }: CustomScannerProp
           encoding: 'base64' as any,
         });
  
-        const srcMat   = (OpenCV as any).base64ToMat(b64);
-        const detected = detectDocumentJS(srcMat, thumb.width, thumb.height, 3);
-        OpenCV.releaseBuffers([srcMat.id]);
+        let srcMatId: string | null = null;
+        try {
+          const srcMat   = OpenCV.base64ToMat(b64);
+          srcMatId = srcMat.id;
+          const detected = detectDocumentJS(srcMat, thumb.width, thumb.height, 3);
  
-        if (detected) accurateCorners = detected;
+          if (detected) accurateCorners = detected;
+        } finally {
+          if (srcMatId) {
+            try { OpenCV.releaseBuffers([srcMatId]); } catch {}
+          }
+        }
       } catch (detectErr) {
         console.warn('[capturePhoto] photo re-detect failed, using frame corners:', detectErr);
       }
@@ -590,7 +615,7 @@ export default function CustomScanner({ onCapture, onCancel }: CustomScannerProp
  
   // Skia overlay
   const screenCorners = detectedCorners
-    ? normalizedToScreenCorners(detectedCorners, frameAspect)
+    ? normalizedToScreenCorners(detectedCorners, frameAspect, SCREEN_W, SCREEN_H)
     : null;
   const skPath      = screenCorners ? buildPolygonPath(screenCorners) : null;
   const strokeColor = isStable && mode === 'auto' ? '#34d399' : '#06b6d4';
@@ -617,10 +642,10 @@ export default function CustomScanner({ onCapture, onCancel }: CustomScannerProp
     );
   }
  
-  if (!device || !hasPermission) return <GestureHandlerRootView style={ss.container} />;
+  if (!device || !hasPermission) return <View style={ss.container} />;
  
   return (
-    <GestureHandlerRootView style={ss.container}>
+    <View style={ss.container}>
       <GestureDetector gesture={cameraGestures}>
         <View style={StyleSheet.absoluteFill}>
           {/* ✅ FIX: plain <Camera> with zoom={zoom} state — no createAnimatedComponent */}
@@ -741,7 +766,7 @@ export default function CustomScanner({ onCapture, onCancel }: CustomScannerProp
           </Text>
         </View>
       )}
-    </GestureHandlerRootView>
+    </View>
   );
 }
  

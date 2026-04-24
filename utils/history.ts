@@ -1,5 +1,4 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import type { OcrEngine } from './mlkit';
 
 const HISTORY_KEY = 'ocr_scan_history';
 const MAX_ITEMS = 50; // Giữ tối đa 50 bản ghi
@@ -13,7 +12,6 @@ export interface ScanRecord {
   isPdf?: boolean;
   ocrDetails?: any[];
   imageSize?: { width: number; height: number };
-  ocrEngine?: OcrEngine;
 }
 
 let memoryStorage: ScanRecord[] | null = null;
@@ -24,7 +22,6 @@ export async function saveToHistory(
   isPdf: boolean = false,
   ocrDetails: any[] = [],
   imageSize: { width: number; height: number } = { width: 1, height: 1 },
-  ocrEngine: OcrEngine = 'backend'
 ): Promise<void> {
   try {
     const existing = await loadHistory();
@@ -37,7 +34,6 @@ export async function saveToHistory(
       isPdf,
       ocrDetails,
       imageSize,
-      ocrEngine,
     };
     const updated = [record, ...existing].slice(0, MAX_ITEMS);
 

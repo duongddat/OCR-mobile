@@ -9,7 +9,7 @@ import { useCameraPermissions } from 'expo-camera';
 import type { CameraView as CameraViewType } from 'expo-camera';
 import * as ImagePicker from 'expo-image-picker';
 import * as DocumentPicker from 'expo-document-picker';
-import Constants, { ExecutionEnvironment } from 'expo-constants';
+import Constants from 'expo-constants';
 import { Ionicons } from '@expo/vector-icons';
 
 import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
@@ -21,8 +21,6 @@ import LegacyCamera from '@/components/scanner/LegacyCamera';
 import ProcessingScreen from '@/components/scanner/ProcessingScreen';
 import ResultScreen from '@/components/scanner/ResultScreen';
 import CustomScanner from '@/components/scanner/CustomScanner';
-import { recognizeTextWithMlKit } from '@/utils/mlkit';
-import type { OcrEngine } from '@/utils/mlkit';
 
 // Native DocumentScanner — null on Expo Go
 let DocumentScanner: any = null;
@@ -33,7 +31,7 @@ try {
   console.log('Không thể tải DocumentScanner Native (Expo Go)');
 }
 
-const isExpoGo = Constants.executionEnvironment === ExecutionEnvironment.StoreClient;
+const isExpoGo = Constants.appOwnership === 'expo';
 
 const BG = '#09090b';
 const SURFACE = '#18181b';
@@ -48,7 +46,6 @@ export default function ScannerScreen() {
   const [ocrText, setOcrText] = useState('');
   const [ocrDetails, setOcrDetails] = useState<any[]>([]);
   const [imageSize, setImageSize] = useState({ width: 1, height: 1 });
-  const [ocrEngine, setOcrEngine] = useState<OcrEngine>('backend');
   const [capturedImage, setCapturedImage] = useState<string | null>(null);
   const [facing, setFacing] = useState<'back' | 'front'>('back');
 
@@ -115,64 +112,6 @@ export default function ScannerScreen() {
   }
 
   // ─── Actions ──────────────────────────────────────────────────────────────
-
-  const persistRecognitionResult = async ({
-    imageUri,
-    text,
-    details,
-    imageSize: nextImageSize,
-    isPdfFlag = false,
-    pages = 0,
-    engine,
-  }: {
-    imageUri: string;
-    text: string;
-    details: any[];
-    imageSize: { width: number; height: number };
-    isPdfFlag?: boolean;
-    pages?: number;
-    engine: OcrEngine;
-  }) => {
-    setOcrText(text);
-    setOcrDetails(details);
-    setImageSize(nextImageSize);
-    setOcrEngine(engine);
-    setTotalPages(pages);
-
-    await saveToHistory(
-      imageUri,
-      text,
-      isPdfFlag,
-      details,
-      nextImageSize,
-      engine
-    );
-    loadHistory().then(setRecords);
-  };
-
-  const recognizeImageWithMlKit = async (uri: string) => {
-    setIsProcessing(true);
-    setOcrText('');
-    setOcrDetails([]);
-    setTotalPages(0);
-
-    try {
-      const result = await recognizeTextWithMlKit(uri);
-      await persistRecognitionResult({
-        imageUri: uri,
-        text: result.text,
-        details: result.details,
-        imageSize: result.imageSize,
-        engine: 'mlkit',
-      });
-      return true;
-    } catch (error) {
-      console.warn('ML Kit text recognition unavailable, fallback to backend OCR:', error);
-      return false;
-    } finally {
-      setIsProcessing(false);
-    }
-  };
 
   const recognizeImage = async (uri: string) => {
     // Luôn gửi ảnh lên server (BE) thay vì OCR cục bộ
@@ -263,7 +202,6 @@ export default function ScannerScreen() {
     setOcrText('');
     setOcrDetails([]);
     setTotalPages(0);
-    setOcrEngine('backend');
 
     // ─ Auto-rotate image based on EXIF before uploading ─────────────────────
     // manipulateAsync with an empty actions array bakes the EXIF rotation
@@ -336,7 +274,6 @@ export default function ScannerScreen() {
           isPdfFlag,
           json.details ?? [],
           json.imageSize ?? { width: 1, height: 1 },
-          'backend'
         );
         loadHistory().then(setRecords);
       } else {
@@ -351,7 +288,7 @@ export default function ScannerScreen() {
 
   const resetScanner = () => {
     setCapturedImage(null); setOcrText(''); setOcrDetails([]);
-    setImageSize({ width: 1, height: 1 }); setOcrEngine('backend');
+    setImageSize({ width: 1, height: 1 }); 
     setUseLegacyCamera(false); setIsPdf(false); setUseCustomScanner(false);
     setPdfFileName(''); setTotalPages(0);
   };
