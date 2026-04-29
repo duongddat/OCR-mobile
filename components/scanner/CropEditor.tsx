@@ -138,14 +138,6 @@ function parseJpegOrientation(b64: string): number {
   return 1;
 }
 
-/** Maps EXIF orientation → OpenCV rotate code (0=90CW, 1=180, 2=90CCW). Returns null if no rotation needed. */
-function exifToRotateCode(orientation: number): 0 | 1 | 2 | null {
-  if (orientation === 6) return 0;
-  if (orientation === 3) return 1;
-  if (orientation === 8) return 2;
-  return null;
-}
-
 interface HandleProps { position: SharedValue<Point>; bounds: HandleBounds }
 
 const Handle = ({ position, bounds }: HandleProps) => {
@@ -398,7 +390,7 @@ export default function CropEditor({
       onConfirm(imageUri);
     } finally {
       setIsCropping(false);
-      try { OpenCV.clearBuffers(ids); } catch {}
+      try { OpenCV.releaseBuffers(ids); } catch {}
     }
   };
 

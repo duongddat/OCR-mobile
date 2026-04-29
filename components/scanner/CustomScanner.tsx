@@ -41,8 +41,7 @@ import * as FileSystem from 'expo-file-system/legacy';
 import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
 import CropEditor from './CropEditor';
  
-const MIN_AREA_RATIO = 0.08;
-const FOCUS_THROTTLE = 1000; // ms between camera.focus() calls
+const FOCUS_THROTTLE = 2000; // ms — tăng lên 2s để camera ổn định hơn khi đã phát hiện tài liệu
  
 // ─── Types ────────────────────────────────────────────────────────────────
  
@@ -53,8 +52,10 @@ export interface DocCorners {
   bl: { x: number; y: number };
 }
  
+export type ScanTarget = 'document' | 'card';
+
 interface CustomScannerProps {
-  onCapture: (uri: string, corners?: any[]) => void;
+  onCapture: (uri: string, corners?: any[], type?: ScanTarget) => void;
   onCancel: () => void;
 }
  
@@ -67,7 +68,90 @@ function getDocumentFocusPoint(c: DocCorners, frameAspect: number, screenW: numb
     y: (sc.tl.y + sc.tr.y + sc.br.y + sc.bl.y) / 4,
   };
 }
- 
+
+// ─── Rectangle validator ──────────────────────────────────────────────────
+// Chạy được trên cả worklet lẫn JS thread.
+// Ba tiêu chí loại bỏ hình tam giác / hình thoi / vùng chữ:
+//   1. Hai cặp cạnh đối phải GẦN SONG SONG  → loại hình tam giác, hình chéo
+//   2. Bốn góc xấp xỉ VUÔNG                 → loại hình thoi, hình bình hành
+//   3. Tỷ lệ khung phù hợp target            → loại bỏ contour chữ / nhiễu
+
+function isRectLike(
+  tl: { x: number; y: number },
+  tr: { x: number; y: number },
+  br: { x: number; y: number },
+  bl: { x: number; y: number },
+  imgW: number,
+  imgH: number,
+  target: 'document' | 'card',
+): boolean {
+  'worklet';
+  // Chuyển sang pixel
+  const P = [
+    { x: tl.x * imgW, y: tl.y * imgH },
+    { x: tr.x * imgW, y: tr.y * imgH },
+    { x: br.x * imgW, y: br.y * imgH },
+    { x: bl.x * imgW, y: bl.y * imgH },
+  ];
+
+  // Các vector cạnh theo thứ tự: tl→tr (top), tr→br (right), br→bl (bottom), bl→tl (left)
+  const S = [
+    { x: P[1].x - P[0].x, y: P[1].y - P[0].y }, // top
+    { x: P[2].x - P[1].x, y: P[2].y - P[1].y }, // right
+    { x: P[3].x - P[2].x, y: P[3].y - P[2].y }, // bottom
+    { x: P[0].x - P[3].x, y: P[0].y - P[3].y }, // left
+  ];
+  const L = S.map((s) => Math.sqrt(s.x * s.x + s.y * s.y));
+
+  // Cạnh quá ngắn → không phải đối tượng thực
+  const minSide = target === 'card' ? 10 : 15;
+  if (L.some((l) => l < minSide)) return false;
+
+  // ── 1. SONG SONG: top ↔ bottom, right ↔ left ─────────────────────────
+  // dot(unit(top), unit(-bottom)) > threshold  → hai cạnh đối gần song song
+  const dot2D = (
+    ax: number, ay: number, al: number,
+    bx: number, by: number, bl2: number,
+  ) => (ax * bx + ay * by) / (al * bl2);
+
+  const parallelTB = dot2D(S[0].x, S[0].y, L[0], -S[2].x, -S[2].y, L[2]);
+  const parallelRL = dot2D(S[1].x, S[1].y, L[1], -S[3].x, -S[3].y, L[3]);
+  
+  // Nới lỏng độ song song để dễ bắt tài liệu khi cầm điện thoại nghiêng (perspective distortion)
+  // 0.65 = cho phép nghiêng tới ~49° (rất dễ bắt)
+  const minParallel = target === 'card' ? 0.85 : 0.65;
+  if (parallelTB < minParallel || parallelRL < minParallel) return false;
+
+  // ── 2. VUÔNG GÓC: các cặp cạnh liền kề ──────────────────────────────
+  // Nới lỏng để chấp nhận các góc nhọn/tù do phối cảnh (hình thang)
+  // doc: |cosA| < 0.55 → góc cho phép từ 56° đến 124° (rất linh hoạt)
+  const maxCos = target === 'card' ? 0.40 : 0.55;
+  for (let i = 0; i < 4; i++) {
+    const a = S[i], b = S[(i + 1) % 4];
+    const lenA = L[i], lenB = L[(i + 1) % 4];
+    if (lenA < 1 || lenB < 1) return false;
+    const cosA = (a.x * b.x + a.y * b.y) / (lenA * lenB);
+    if (Math.abs(cosA) > maxCos) return false;
+  }
+
+  // ── 3. TỶ LỆ KHUNG ───────────────────────────────────────────────────
+  const w = (L[0] + L[2]) / 2; // trung bình cạnh ngang (top + bottom)
+  const h = (L[1] + L[3]) / 2; // trung bình cạnh dọc (right + left)
+  if (w < minSide || h < minSide) return false;
+
+  // Chuẩn hoá về landscape để so sánh
+  const aspect = w > h ? w / h : h / w;
+
+  if (target === 'card') {
+    // Thẻ chuẩn ISO ID-1: 85.6 × 54 mm → 1.586
+    // Giới hạn 1.35 – 1.80 để loại bỏ hình vuông hoặc quá dài
+    return aspect >= 1.35 && aspect <= 1.80;
+  }
+  // Tài liệu: A4=1.414, Letter=1.294, A5=1.5, hoá đơn dài...
+  // → cho phép 1.0 – 3.0
+  return aspect >= 1.0 && aspect <= 3.0;
+}
+
 // ─── OpenCV detection (worklet) ───────────────────────────────────────────
  
 function detectDocument(
@@ -75,6 +159,8 @@ function detectDocument(
   imgW: number,
   imgH: number,
   channels: number = 4,
+  minAreaRatio: number = 0.06,
+  target: 'document' | 'card' = 'document',  // ✅ FIX: thêm tham số target
 ): DocCorners | null {
   'worklet';
   const ids: string[] = [];
@@ -87,36 +173,71 @@ function detectDocument(
  
     const blurred = OpenCV.createObject('mat' as ObjectType.Mat, imgH, imgW, 0);
     ids.push(blurred.id);
-    const ksize = OpenCV.createObject('size' as ObjectType.Size, 7, 7);
+    const ksize = OpenCV.createObject('size' as ObjectType.Size, 5, 5);
     ids.push(ksize.id);
-    OpenCV.invoke('GaussianBlur', gray, blurred, ksize, 0);
+
+    // BUG-01 FIX: convertScaleAbs KHÔNG hỗ trợ in-place → dùng mat riêng
+    let srcForBlur = gray;
+    if (target === 'card') {
+      const contrasted = OpenCV.createObject('mat' as ObjectType.Mat, imgH, imgW, 0);
+      ids.push(contrasted.id);
+      OpenCV.invoke('convertScaleAbs', gray, contrasted, 1.5, 0);
+      srcForBlur = contrasted;
+    }
+
+    OpenCV.invoke('GaussianBlur', srcForBlur, blurred, ksize, 0);
  
     const edges = OpenCV.createObject('mat' as ObjectType.Mat, imgH, imgW, 0);
     ids.push(edges.id);
-    OpenCV.invoke('Canny', blurred, edges, 50, 150);
+    // Thẻ thường có nền trắng/sáng trên bàn tối → giảm ngưỡng Canny
+    const cannyLow  = target === 'card' ? 20 : 30;
+    const cannyHigh = target === 'card' ? 80 : 100;
+    OpenCV.invoke('Canny', blurred, edges, cannyLow, cannyHigh);
  
+    const kernelSize = OpenCV.createObject('size' as ObjectType.Size, 5, 5);
+    ids.push(kernelSize.id);
     const kernel = OpenCV.invoke(
       'getStructuringElement',
       0 as MorphShapes.MORPH_RECT,
-      OpenCV.createObject('size' as ObjectType.Size, 9, 9),
+      kernelSize,
     ) as any;
     ids.push(kernel.id);
  
     const closed = OpenCV.createObject('mat' as ObjectType.Mat, imgH, imgW, 0);
     ids.push(closed.id);
     OpenCV.invoke('morphologyEx', edges, closed, 3 as MorphTypes.MORPH_CLOSE, kernel);
+
+    // CR-01 FIX: morphologyEx in-place không được hỗ trợ → dùng mat riêng cho dilate
+    let edgeMask = closed;
+    if (target === 'card') {
+      const dilateSize = OpenCV.createObject('size' as ObjectType.Size, 3, 3);
+      ids.push(dilateSize.id);
+      const dilateKernel = OpenCV.invoke(
+        'getStructuringElement',
+        0 as MorphShapes.MORPH_RECT,
+        dilateSize,
+      ) as any;
+      ids.push(dilateKernel.id);
+      const dilated = OpenCV.createObject('mat' as ObjectType.Mat, imgH, imgW, 0);
+      ids.push(dilated.id);
+      OpenCV.invoke('morphologyEx', closed, dilated, 1 as MorphTypes.MORPH_DILATE, dilateKernel);
+      edgeMask = dilated;
+    }
  
     const contours = OpenCV.createObject('mat_vector' as ObjectType.MatVector);
     ids.push(contours.id);
     OpenCV.invoke(
-      'findContours', closed, contours,
+      'findContours', edgeMask, contours,
       0 as RetrievalModes.RETR_EXTERNAL,
       2 as ContourApproximationModes.CHAIN_APPROX_SIMPLE,
     );
  
     const contourJs = OpenCV.toJSValue(contours) as { array: any[] };
     const count     = contourJs.array.length;
-    const minArea   = imgW * imgH * MIN_AREA_RATIO;
+    const minArea   = imgW * imgH * minAreaRatio;
+    // BUG-02 FIX: card maxArea 0.55 (thẻ không bao giờ chiếm >55% frame)
+    // document maxArea 0.90 (giấy có thể gần full frame)
+    const maxArea   = imgW * imgH * (target === 'card' ? 0.55 : 0.90);
     let best: DocCorners | null = null;
     let bestArea = 0;
  
@@ -125,29 +246,46 @@ function detectDocument(
       ids.push(contour.id);
  
       const area = (OpenCV.invoke('contourArea', contour) as { value: number }).value;
-      if (area <= minArea || area <= bestArea) continue;
+      if (area <= minArea || area >= maxArea || area <= bestArea) continue;
  
       const peri = (OpenCV.invoke('arcLength', contour, true) as { value: number }).value;
       const approx = OpenCV.createObject('mat' as ObjectType.Mat, 0, 0, 0);
       ids.push(approx.id);
-      OpenCV.invoke('approxPolyDP', contour, approx, 0.02 * peri, true);
- 
-      const buf    = OpenCV.matToBuffer(approx, 'int32');
-      const numPts = buf.rows * buf.cols;
-      if (numPts < 4) continue;
- 
-      const raw: { x: number; y: number }[] = [];
-      for (let j = 0; j < numPts; j++) {
-        raw.push({ x: buf.buffer[j * 2] / imgW, y: buf.buffer[j * 2 + 1] / imgH });
+      
+      // WARN-03 FIX: card cần epsilon nhỏ (cạnh thẳng cứng), doc dùng epsilon lớn hơn (giấy cong)
+      const epsilons = target === 'card'
+        ? [0.02, 0.03, 0.04, 0.05]
+        : [0.02, 0.035, 0.05, 0.065, 0.08, 0.10, 0.13];
+      let numPts = 999;
+      let buf: any = null;
+
+      for (let ei = 0; ei < epsilons.length; ei++) {
+        OpenCV.invoke('approxPolyDP', contour, approx, epsilons[ei] * peri, true);
+        buf = OpenCV.matToBuffer(approx, 'int32');
+        numPts = buf.rows; // rows = số điểm (approxPolyDP trả N×1×2)
+        if (numPts <= 4) break;
       }
- 
+
+      // STRICT: chỉ chấp nhận đúng 4 điểm + đủ buffer
+      if (numPts !== 4 || !buf || buf.buffer.length < 8) continue;
+
+      // Sắp xếp 4 góc theo thứ tự tl / tr / br / bl
+      const raw: { x: number; y: number }[] = [
+        { x: buf.buffer[0] / imgW, y: buf.buffer[1] / imgH },
+        { x: buf.buffer[2] / imgW, y: buf.buffer[3] / imgH },
+        { x: buf.buffer[4] / imgW, y: buf.buffer[5] / imgH },
+        { x: buf.buffer[6] / imgW, y: buf.buffer[7] / imgH },
+      ];
       raw.sort((a, b) => (a.x + a.y) - (b.x + b.y));
       const tl = raw[0];
-      const br = raw[raw.length - 1];
+      const br = raw[3];
       raw.sort((a, b) => (a.x - a.y) - (b.x - b.y));
       const bl = raw[0];
-      const tr = raw[raw.length - 1];
- 
+      const tr = raw[3];
+
+      // Xác thực hình chữ nhật: song song + vuông góc + tỷ lệ đúng
+      if (!isRectLike(tl, tr, br, bl, imgW, imgH, target)) continue;  // ✅ FIX: truyền đúng target
+
       best     = { tl, tr, br, bl };
       bestArea = area;
     }
@@ -168,6 +306,8 @@ function detectDocumentJS(
   imgW: number,
   imgH: number,
   channels = 3,
+  minAreaRatio = 0.06,
+  target: 'document' | 'card' = 'document',
 ): DocCorners | null {
   const ids: string[] = [];
   const cleanup = () => { try { OpenCV.releaseBuffers(ids); } catch {} };
@@ -179,36 +319,69 @@ function detectDocumentJS(
  
     const blurred = OpenCV.createObject('mat' as ObjectType.Mat, imgH, imgW, 0);
     ids.push(blurred.id);
-    const ksize = OpenCV.createObject('size' as ObjectType.Size, 7, 7);
+    const ksize = OpenCV.createObject('size' as ObjectType.Size, 5, 5);
     ids.push(ksize.id);
-    OpenCV.invoke('GaussianBlur', gray, blurred, ksize, 0);
+
+    // BUG-01 FIX: convertScaleAbs KHÔNG hỗ trợ in-place → dùng mat riêng
+    let srcForBlur = gray;
+    if (target === 'card') {
+      const contrasted = OpenCV.createObject('mat' as ObjectType.Mat, imgH, imgW, 0);
+      ids.push(contrasted.id);
+      OpenCV.invoke('convertScaleAbs', gray, contrasted, 1.5, 0);
+      srcForBlur = contrasted;
+    }
+
+    OpenCV.invoke('GaussianBlur', srcForBlur, blurred, ksize, 0);
  
     const edges = OpenCV.createObject('mat' as ObjectType.Mat, imgH, imgW, 0);
     ids.push(edges.id);
-    OpenCV.invoke('Canny', blurred, edges, 50, 150);
+    const cannyLow  = target === 'card' ? 20 : 30;
+    const cannyHigh = target === 'card' ? 80 : 100;
+    OpenCV.invoke('Canny', blurred, edges, cannyLow, cannyHigh);
  
+    const kernelSize = OpenCV.createObject('size' as ObjectType.Size, 5, 5);
+    ids.push(kernelSize.id);
     const kernel = OpenCV.invoke(
       'getStructuringElement',
       0 as MorphShapes.MORPH_RECT,
-      OpenCV.createObject('size' as ObjectType.Size, 9, 9),
+      kernelSize,
     ) as any;
     ids.push(kernel.id);
  
     const closed = OpenCV.createObject('mat' as ObjectType.Mat, imgH, imgW, 0);
     ids.push(closed.id);
     OpenCV.invoke('morphologyEx', edges, closed, 3 as MorphTypes.MORPH_CLOSE, kernel);
+
+    // CR-01 FIX: morphologyEx in-place không được hỗ trợ → dùng mat riêng
+    let edgeMask = closed;
+    if (target === 'card') {
+      const dilateSize = OpenCV.createObject('size' as ObjectType.Size, 3, 3);
+      ids.push(dilateSize.id);
+      const dilateKernel = OpenCV.invoke(
+        'getStructuringElement',
+        0 as MorphShapes.MORPH_RECT,
+        dilateSize,
+      ) as any;
+      ids.push(dilateKernel.id);
+      const dilated = OpenCV.createObject('mat' as ObjectType.Mat, imgH, imgW, 0);
+      ids.push(dilated.id);
+      OpenCV.invoke('morphologyEx', closed, dilated, 1 as MorphTypes.MORPH_DILATE, dilateKernel);
+      edgeMask = dilated;
+    }
  
     const contours = OpenCV.createObject('mat_vector' as ObjectType.MatVector);
     ids.push(contours.id);
     OpenCV.invoke(
-      'findContours', closed, contours,
+      'findContours', edgeMask, contours,
       0 as RetrievalModes.RETR_EXTERNAL,
       2 as ContourApproximationModes.CHAIN_APPROX_SIMPLE,
     );
  
     const contourJs = OpenCV.toJSValue(contours) as { array: any[] };
     const count     = contourJs.array.length;
-    const minArea   = imgW * imgH * MIN_AREA_RATIO;
+    const minArea   = imgW * imgH * minAreaRatio;
+    // BUG-02 FIX: card maxArea 0.55, document 0.90
+    const maxArea   = imgW * imgH * (target === 'card' ? 0.55 : 0.90);
     let best: DocCorners | null = null;
     let bestArea = 0;
  
@@ -217,29 +390,43 @@ function detectDocumentJS(
       ids.push(contour.id);
  
       const area = (OpenCV.invoke('contourArea', contour) as { value: number }).value;
-      if (area <= minArea || area <= bestArea) continue;
+      if (area <= minArea || area >= maxArea || area <= bestArea) continue;
  
       const peri = (OpenCV.invoke('arcLength', contour, true) as { value: number }).value;
       const approx = OpenCV.createObject('mat' as ObjectType.Mat, 0, 0, 0);
       ids.push(approx.id);
-      OpenCV.invoke('approxPolyDP', contour, approx, 0.02 * peri, true);
- 
-      const buf    = OpenCV.matToBuffer(approx, 'int32');
-      const numPts = buf.rows * buf.cols;
-      if (numPts < 4) continue;
- 
-      const raw: { x: number; y: number }[] = [];
-      for (let j = 0; j < numPts; j++) {
-        raw.push({ x: buf.buffer[j * 2] / imgW, y: buf.buffer[j * 2 + 1] / imgH });
+      
+      // WARN-03 FIX: card dùng epsilon nhỏ hơn (cạnh cứng thẳng)
+      const epsilons = target === 'card'
+        ? [0.02, 0.03, 0.04, 0.05]
+        : [0.02, 0.035, 0.05, 0.065, 0.08, 0.10, 0.13];
+      let numPts = 999;
+      let buf: any = null;
+
+      for (let ei = 0; ei < epsilons.length; ei++) {
+        OpenCV.invoke('approxPolyDP', contour, approx, epsilons[ei] * peri, true);
+        buf = OpenCV.matToBuffer(approx, 'int32');
+        numPts = buf.rows; // rows = số điểm
+        if (numPts <= 4) break;
       }
- 
+
+      if (numPts !== 4 || !buf || buf.buffer.length < 8) continue;
+
+      const raw: { x: number; y: number }[] = [
+        { x: buf.buffer[0] / imgW, y: buf.buffer[1] / imgH },
+        { x: buf.buffer[2] / imgW, y: buf.buffer[3] / imgH },
+        { x: buf.buffer[4] / imgW, y: buf.buffer[5] / imgH },
+        { x: buf.buffer[6] / imgW, y: buf.buffer[7] / imgH },
+      ];
       raw.sort((a, b) => (a.x + a.y) - (b.x + b.y));
       const tl = raw[0];
-      const br = raw[raw.length - 1];
+      const br = raw[3];
       raw.sort((a, b) => (a.x - a.y) - (b.x - b.y));
       const bl = raw[0];
-      const tr = raw[raw.length - 1];
- 
+      const tr = raw[3];
+
+      if (!isRectLike(tl, tr, br, bl, imgW, imgH, target)) continue;
+
       best     = { tl, tr, br, bl };
       bestArea = area;
     }
@@ -323,6 +510,7 @@ export default function CustomScanner({ onCapture, onCancel }: CustomScannerProp
  
   const [isActive, setIsActive]               = useState(true);
   const [mode, setMode]                       = useState<'auto' | 'manual'>('auto');
+  const [scanTarget, setScanTarget]           = useState<ScanTarget>('document');
   const [torchEnabled, setTorchEnabled]       = useState(false);
   const [detectedCorners, setDetectedCorners] = useState<DocCorners | null>(null);
   const [isStable, setIsStable]               = useState(false);
@@ -337,19 +525,23 @@ export default function CustomScanner({ onCapture, onCancel }: CustomScannerProp
   const [zoom, setZoom] = useState(device?.minZoom ?? 1);
   const [frameAspect, setFrameAspect] = useState(1);
  
-  // Refs
-  const cameraRef        = useRef<CameraRef>(null);
-  const lastFocusTimeRef = useRef<number>(0);
-  const prevCornersRef   = useRef<DocCorners | null>(null);
-  const stableTimerRef   = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const cameraRef          = useRef<CameraRef>(null);
+  const lastFocusTimeRef   = useRef<number>(0);
+  const prevCornersRef     = useRef<DocCorners | null>(null);  // EMA output → dùng cho overlay
+  const prevRawCornersRef  = useRef<DocCorners | null>(null);  // raw → dùng đo stability
+  const lockedCornersRef   = useRef<DocCorners | null>(null);  // corners bị khóa khi stable
+  const stableFrameCount   = useRef<number>(0);               // đếm frame ổn định liên tiếp
+  const stableTimerRef     = useRef<ReturnType<typeof setTimeout> | null>(null);
  
   // Shared values
   const isActiveShared     = useSharedValue(true);
+  const minAreaRatioShared = useSharedValue(0.06);
+  const scanTargetShared   = useSharedValue<0 | 1>(0); // 0 = document, 1 = card
   const frameCounterShared = useSharedValue(0);
   const frameAspectShared  = useSharedValue(1);
   const fillAnim           = useSharedValue(0);
   const docMinY            = useSharedValue(0);
-  const docMaxY            = useSharedValue(2000); // placeholder, updated in render
+  const docMaxY            = useSharedValue(2000);
 
   // Zoom shared values (for pinch gesture on UI thread)
   const minZoom   = device?.minZoom ?? 1;
@@ -357,7 +549,6 @@ export default function CustomScanner({ onCapture, onCancel }: CustomScannerProp
   const zoomValue = useSharedValue(device?.minZoom ?? 1);
   const startZoom = useSharedValue(1);
 
-  // ✅ FIX: sync UI-thread zoom → JS state (replaces useAnimatedProps)
   useAnimatedReaction(
     () => zoomValue.value,
     (z) => runOnJS(setZoom)(z),
@@ -368,7 +559,7 @@ export default function CustomScanner({ onCapture, onCancel }: CustomScannerProp
   const tapFocusY    = useSharedValue(0);
   const focusOpacity = useSharedValue(0);
   const focusScale   = useSharedValue(1);
-  const focusRingColor = useSharedValue('#34d399'); // green = manual tap, cyan = auto-doc focus
+  const focusRingColor = useSharedValue('#34d399');
  
   const progressY = useDerivedValue(() => {
     const h = docMaxY.value - docMinY.value;
@@ -384,17 +575,27 @@ export default function CustomScanner({ onCapture, onCancel }: CustomScannerProp
   useEffect(() => {
     if (!hasPermission) requestPermission();
   }, [hasPermission]);
+
+  // Sync min area ratio + scan target to worklet thread
+  useEffect(() => {
+    // Document: 6% (đủ nhạy), Card: 8% (tránh nhiễu nhỏ cho thẻ)
+    minAreaRatioShared.value = scanTarget === 'card' ? 0.08 : 0.06;
+    scanTargetShared.value   = scanTarget === 'card' ? 1 : 0;
+  }, [scanTarget, minAreaRatioShared, scanTargetShared]);
  
-  // Reset on mode change
+  // Reset on mode / target change
   useEffect(() => {
     setDetectedCorners(null);
     setIsStable(false);
     setHasAutoShot(false);
-    prevCornersRef.current = null;
+    prevCornersRef.current    = null;
+    prevRawCornersRef.current = null;
+    lockedCornersRef.current  = null;
+    stableFrameCount.current  = 0;
     cancelAnimation(fillAnim);
     fillAnim.value = 0;
     if (stableTimerRef.current) { clearTimeout(stableTimerRef.current); stableTimerRef.current = null; }
-  }, [mode]);
+  }, [mode, scanTarget]);
  
   useEffect(() => {
     if (isStable && mode === 'auto') {
@@ -415,54 +616,98 @@ export default function CustomScanner({ onCapture, onCancel }: CustomScannerProp
   }, [isStable, mode, isActive, hasAutoShot]);
  
   // ── Corner update + stability detection + SMART FOCUS ─────────────────
-  const onCornersDetected = useCallback((corners: DocCorners | null, aspect: number) => {
-    setDetectedCorners(corners);
+  const onCornersDetected = useCallback((rawCorners: DocCorners | null, aspect: number) => {
+    const prev    = prevCornersRef.current;
+    const prevRaw = prevRawCornersRef.current;
+
+    // Đo chuyển động dựa trên RAW vs RAW (chính xác hơn EMA vs RAW)
+    const movedRaw = prevRaw && rawCorners ? cornersDistance(prevRaw, rawCorners) : Infinity;
+
+    // ── Adaptive EMA ────────────────────────────────────────────────────
+    // Alpha thấp = smoothing mạnh (overlay ổn định), alpha cao = bắt kịp nhanh
+    //   movedRaw < 0.03 → tài liệu gần như đứng yên → alpha 0.10 (rất ổn định)
+    //   movedRaw < 0.12 → chuyển động nhẹ          → alpha 0.35
+    //   movedRaw >= 0.12 → chuyển động lớn         → alpha 0.75 (bắt kịp nhanh)
+    let finalCorners = rawCorners;
+    if (rawCorners && prev) {
+      const alpha = movedRaw < 0.03 ? 0.10
+                  : movedRaw < 0.12 ? 0.35
+                  : 0.75;
+      finalCorners = {
+        tl: { x: prev.tl.x + (rawCorners.tl.x - prev.tl.x) * alpha, y: prev.tl.y + (rawCorners.tl.y - prev.tl.y) * alpha },
+        tr: { x: prev.tr.x + (rawCorners.tr.x - prev.tr.x) * alpha, y: prev.tr.y + (rawCorners.tr.y - prev.tr.y) * alpha },
+        br: { x: prev.br.x + (rawCorners.br.x - prev.br.x) * alpha, y: prev.br.y + (rawCorners.br.y - prev.br.y) * alpha },
+        bl: { x: prev.bl.x + (rawCorners.bl.x - prev.bl.x) * alpha, y: prev.bl.y + (rawCorners.bl.y - prev.bl.y) * alpha },
+      };
+    }
+
     setFrameAspect(aspect);
- 
+
     const now      = Date.now();
     const canFocus = now - lastFocusTimeRef.current > FOCUS_THROTTLE;
- 
-    if (!corners) {
+    const wasTracking = prev !== null;
+
+    // ── Không có tài liệu ────────────────────────────────────────────────
+    if (!finalCorners) {
       setIsStable(false);
-      prevCornersRef.current = null;
+      setDetectedCorners(null);
+      lockedCornersRef.current  = null;
+      stableFrameCount.current  = 0;
+      prevCornersRef.current    = null;
+      prevRawCornersRef.current = null;
       if (stableTimerRef.current) {
         clearTimeout(stableTimerRef.current);
         stableTimerRef.current = null;
       }
+      // Focus trung tâm khi mất tài liệu (throttled)
       if (canFocus && cameraRef.current) {
         lastFocusTimeRef.current = now;
-        cameraRef.current
-          .focusTo({ x: SCREEN_W / 2, y: SCREEN_H / 2 })
-          .catch(() => {});
+        cameraRef.current.focusTo({ x: SCREEN_W / 2, y: SCREEN_H / 2 }).catch(() => {});
       }
       return;
     }
- 
-    const sc = normalizedToScreenCorners(corners, aspect, SCREEN_W, SCREEN_H);
-    docMinY.value = Math.min(sc.tl.y, sc.tr.y, sc.bl.y, sc.br.y);
-    docMaxY.value = Math.max(sc.tl.y, sc.tr.y, sc.bl.y, sc.br.y);
- 
-    if (canFocus && cameraRef.current) {
+
+    // ── Focus logic: 3 trường hợp ────────────────────────────────────────
+    // 1. Tài liệu vừa xuất hiện lần đầu   → focus ngay (không cần throttle)
+    // 2. Di chuyển lớn khi đang tracking   → refocus (throttled FOCUS_THROTTLE)
+    // 3. Đang tracking ổn định             → KHÔNG focus (tránh làm nhòe ảnh)
+    const bigMove = movedRaw > 0.15; // di chuyển > 15% kích thước frame
+    const shouldFocus = !wasTracking || (bigMove && canFocus);
+
+    if (shouldFocus && cameraRef.current) {
       lastFocusTimeRef.current = now;
-      const { x: fx, y: fy } = getDocumentFocusPoint(corners, aspect, SCREEN_W, SCREEN_H);
+      const { x: fx, y: fy } = getDocumentFocusPoint(finalCorners, aspect, SCREEN_W, SCREEN_H);
       const safeX = Math.max(1, Math.min(SCREEN_W - 1, fx));
       const safeY = Math.max(1, Math.min(SCREEN_H - 1, fy));
       cameraRef.current.focusTo({ x: safeX, y: safeY }).catch(() => {});
-
-      // ✅ FIX: Hiển thị focus ring tại tâm tài liệu khi auto-focus
       tapFocusX.value = safeX;
       tapFocusY.value = safeY;
-      focusRingColor.value = '#06b6d4'; // cyan = auto-focus tài liệu
+      focusRingColor.value = '#06b6d4'; // luôn xanh dương cho focus ring
       focusOpacity.value = 1;
-      focusScale.value = 1.4;
-      focusScale.value = withTiming(1, { duration: 350 });
+      focusScale.value   = 1.4;
+      focusScale.value   = withTiming(1, { duration: 350 });
       focusOpacity.value = withTiming(0, { duration: 1000 });
     }
- 
-    const prev  = prevCornersRef.current;
-    const moved = prev ? cornersDistance(prev, corners) : Infinity;
- 
-    if (moved < 0.035) {
+    // ── Tracking ổn định → không gọi focusTo() ───────────────────────────
+
+    const sc = normalizedToScreenCorners(finalCorners, aspect, SCREEN_W, SCREEN_H);
+    docMinY.value = Math.min(sc.tl.y, sc.tr.y, sc.bl.y, sc.br.y);
+    docMaxY.value = Math.max(sc.tl.y, sc.tr.y, sc.bl.y, sc.br.y);
+
+    const currentlyStable = movedRaw < 0.05;
+
+    if (currentlyStable) {
+      stableFrameCount.current++;
+      // Lock corners sau 3 frame ổn định liên tiếp (~1.2s ở 4fps)
+      if (stableFrameCount.current >= 3) {
+        if (!lockedCornersRef.current) {
+          lockedCornersRef.current = finalCorners;
+        }
+        // Hiển thị locked corners — overlay đứng yên hoàn toàn khi stable
+        setDetectedCorners(lockedCornersRef.current);
+      } else {
+        setDetectedCorners(finalCorners);
+      }
       if (!stableTimerRef.current) {
         stableTimerRef.current = setTimeout(() => {
           setIsStable(true);
@@ -470,6 +715,9 @@ export default function CustomScanner({ onCapture, onCancel }: CustomScannerProp
         }, 400);
       }
     } else {
+      stableFrameCount.current  = 0;
+      lockedCornersRef.current  = null;
+      setDetectedCorners(finalCorners);
       setIsStable(false);
       setHasAutoShot(false);
       if (stableTimerRef.current) {
@@ -477,9 +725,10 @@ export default function CustomScanner({ onCapture, onCancel }: CustomScannerProp
         stableTimerRef.current = null;
       }
     }
- 
-    prevCornersRef.current = corners;
-  }, [tapFocusX, tapFocusY, focusOpacity, focusScale, focusRingColor]);
+
+    prevRawCornersRef.current = rawCorners;   // lưu raw để đo stability
+    prevCornersRef.current    = finalCorners; // lưu EMA để smooth overlay
+  }, [tapFocusX, tapFocusY, focusOpacity, focusScale, focusRingColor, SCREEN_W, SCREEN_H, docMinY, docMaxY]);
 
   // ── Gestures ──────────────────────────────────────────────────────────
   const handleManualFocus = useCallback((x: number, y: number) => {
@@ -492,7 +741,7 @@ export default function CustomScanner({ onCapture, onCancel }: CustomScannerProp
   const singleTap = Gesture.Tap().onEnd((e) => {
     tapFocusX.value = e.x;
     tapFocusY.value = e.y;
-    focusRingColor.value = '#34d399'; // green = tap thủ công
+    focusRingColor.value = '#34d399';
     focusOpacity.value = 1;
     focusScale.value = 1.3;
     focusScale.value = withTiming(1, { duration: 300 });
@@ -515,7 +764,6 @@ export default function CustomScanner({ onCapture, onCancel }: CustomScannerProp
 
   const cameraGestures = Gesture.Simultaneous(pinchGesture, Gesture.Exclusive(doubleTap, singleTap));
 
-  // Focus Ring color: cyan for auto-doc focus, green for manual tap
   const focusRingStyle = useAnimatedStyle(() => ({
     opacity: focusOpacity.value,
     transform: [{ scale: focusScale.value }],
@@ -527,7 +775,6 @@ export default function CustomScanner({ onCapture, onCancel }: CustomScannerProp
   // ── Frame processor ────────────────────────────────────────────────────
   const frameOutput = useFrameOutput({
     pixelFormat: 'rgb',
-    // enablePhysicalBufferRotation removed: frame ở landscape gây offsetX âm lớn, polygon vẽ ngoài màn hình
     onFrame: (frame) => {
       'worklet';
       if (!isActiveShared.value) { frame.dispose(); return; }
@@ -546,8 +793,9 @@ export default function CustomScanner({ onCapture, onCancel }: CustomScannerProp
  
         const src = OpenCV.bufferToMat('uint8', frame.height, frame.width, channels, uint8);
         srcId = src.id;
-        const corners = detectDocument(src, frame.width, frame.height, channels);
- 
+        const tgt = scanTargetShared.value === 1 ? 'card' : 'document';
+        const corners = detectDocument(src, frame.width, frame.height, channels, minAreaRatioShared.value, tgt);
+
         runOnJS(onCornersDetected)(corners, frameAspectShared.value);
       } catch (e: any) {
         console.log('[WORKLET] onFrame error:', e?.message || 'Unknown error');
@@ -588,7 +836,11 @@ export default function CustomScanner({ onCapture, onCancel }: CustomScannerProp
         try {
           const srcMat   = OpenCV.base64ToMat(b64);
           srcMatId = srcMat.id;
-          const detected = detectDocumentJS(srcMat, thumb.width, thumb.height, 3);
+          const detected = detectDocumentJS(
+            srcMat, thumb.width, thumb.height, 3,
+            scanTarget === 'card' ? 0.08 : 0.06,
+            scanTarget,  // ✅ FIX: truyền đúng target cho JS thread
+          );
  
           if (detected) accurateCorners = detected;
         } finally {
@@ -609,7 +861,7 @@ export default function CustomScanner({ onCapture, onCancel }: CustomScannerProp
     } catch (e) {
       console.error('[CustomScanner] capture error:', e);
     }
-  }, [photoOutput, isActive, detectedCorners]);
+  }, [photoOutput, isActive, detectedCorners, scanTarget]);  // ✅ FIX: thêm scanTarget
  
   const handleCaptureBtn = useCallback(() => capturePhoto(), [capturePhoto]);
  
@@ -637,18 +889,19 @@ export default function CustomScanner({ onCapture, onCancel }: CustomScannerProp
           setHasAutoShot(false);
           prevCornersRef.current = null;
         }}
-        onConfirm={(croppedUri) => onCapture(croppedUri, [])}
+        onConfirm={(croppedUri) => onCapture(croppedUri, [], scanTarget)}
       />
     );
   }
  
   if (!device || !hasPermission) return <View style={ss.container} />;
  
+  const targetLabel = scanTarget === 'card' ? 'thẻ' : 'tài liệu';
+
   return (
     <View style={ss.container}>
       <GestureDetector gesture={cameraGestures}>
         <View style={StyleSheet.absoluteFill}>
-          {/* ✅ FIX: plain <Camera> with zoom={zoom} state — no createAnimatedComponent */}
           <Camera
             ref={cameraRef}
             style={StyleSheet.absoluteFill}
@@ -708,8 +961,8 @@ export default function CustomScanner({ onCapture, onCancel }: CustomScannerProp
           {detectedCorners
             ? isStable
               ? mode === 'auto' ? 'Đang chụp tự động…' : 'Sẵn sàng — nhấn chụp'
-              : 'Phát hiện tài liệu…'
-            : 'Đang tìm tài liệu…'}
+              : `Phát hiện ${targetLabel}…`
+            : `Đang tìm ${targetLabel}…`}
         </Text>
       </View>
  
@@ -718,19 +971,41 @@ export default function CustomScanner({ onCapture, onCancel }: CustomScannerProp
           <Ionicons name="close" size={22} color="#fff" />
         </TouchableOpacity>
 
-        <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.55)', borderRadius: 20, paddingHorizontal: 14, paddingVertical: 7 }}>
-          <Text style={ss.title}>
-            {mode === 'auto' ? '⚡ Auto' : '✋ Manual'}
-          </Text>
+        <View style={{ flexDirection: 'row', backgroundColor: 'rgba(0,0,0,0.5)', borderRadius: 24, padding: 4 }}>
+          <TouchableOpacity
+            onPress={() => setMode('manual')}
+            style={{
+              paddingHorizontal: 16,
+              paddingVertical: 8,
+              borderRadius: 20,
+              backgroundColor: mode === 'manual' ? '#e5e7eb' : 'transparent',
+            }}
+          >
+            <Text style={{
+              color: mode === 'manual' ? '#111827' : '#e5e7eb',
+              fontSize: 13,
+              fontWeight: '600'
+            }}>Chụp thủ công</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            onPress={() => setMode('auto')}
+            style={{
+              paddingHorizontal: 16,
+              paddingVertical: 8,
+              borderRadius: 20,
+              backgroundColor: mode === 'auto' ? '#e5e7eb' : 'transparent',
+            }}
+          >
+            <Text style={{
+              color: mode === 'auto' ? '#111827' : '#e5e7eb',
+              fontSize: 13,
+              fontWeight: '600'
+            }}>Tự động chụp</Text>
+          </TouchableOpacity>
         </View>
 
-        <View style={{ flexDirection: 'row', gap: 12 }}>
-          <TouchableOpacity
-            style={ss.iconBtn}
-            onPress={() => setMode((m) => (m === 'auto' ? 'manual' : 'auto'))}
-          >
-            <Ionicons name={mode === 'auto' ? 'scan' : 'document-text'} size={20} color="#fff" />
-          </TouchableOpacity>
+        <View style={{ width: 40, alignItems: 'flex-end' }}>
           <TouchableOpacity
             style={ss.iconBtn}
             onPress={() => setTorchEnabled(t => !t)}
@@ -740,6 +1015,21 @@ export default function CustomScanner({ onCapture, onCancel }: CustomScannerProp
         </View>
       </View>
  
+      <View style={[ss.targetToggle, { bottom: insets.bottom + 140 }]}>
+        <TouchableOpacity
+          style={[ss.targetBtn, scanTarget === 'document' && ss.targetBtnActive]}
+          onPress={() => { setScanTarget('document'); setDetectedCorners(null); }}
+        >
+          <Text style={[ss.targetText, scanTarget === 'document' && ss.targetTextActive]}>Tài liệu</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[ss.targetBtn, scanTarget === 'card' && ss.targetBtnActive]}
+          onPress={() => { setScanTarget('card'); setDetectedCorners(null); }}
+        >
+          <Text style={[ss.targetText, scanTarget === 'card' && ss.targetTextActive]}>Thẻ</Text>
+        </TouchableOpacity>
+      </View>
+
       {mode === 'manual' && (
         <View style={[ss.footer, { bottom: insets.bottom + 36 }]}>
           <TouchableOpacity
@@ -752,7 +1042,7 @@ export default function CustomScanner({ onCapture, onCancel }: CustomScannerProp
             }]} />
           </TouchableOpacity>
           <Text style={ss.hint}>
-            {detectedCorners ? 'Nhấn để chụp tài liệu' : 'Đưa tài liệu vào khung hình'}
+            {detectedCorners ? `Nhấn để chụp ${targetLabel}` : `Đưa ${targetLabel} vào khung hình`}
           </Text>
         </View>
       )}
@@ -762,7 +1052,7 @@ export default function CustomScanner({ onCapture, onCancel }: CustomScannerProp
           <Text style={ss.hint}>
             {detectedCorners
               ? isStable ? 'Giữ nguyên, đang chụp…' : 'Giữ điện thoại ổn định'
-              : 'Đưa tài liệu vào khung hình'}
+              : `Đưa ${targetLabel} vào khung hình`}
           </Text>
         </View>
       )}
@@ -811,5 +1101,23 @@ const ss = StyleSheet.create({
     backgroundColor: 'rgba(0,0,0,0.6)',
     paddingHorizontal: 16, paddingVertical: 7,
     borderRadius: 16, overflow: 'hidden',
+  },
+
+  targetToggle: {
+    position: 'absolute', alignSelf: 'center',
+    flexDirection: 'row', backgroundColor: 'rgba(0,0,0,0.6)',
+    borderRadius: 20, padding: 4,
+  },
+  targetBtn: {
+    paddingHorizontal: 20, paddingVertical: 8, borderRadius: 16,
+  },
+  targetBtnActive: {
+    backgroundColor: '#06b6d4',
+  },
+  targetText: {
+    color: 'rgba(255,255,255,0.7)', fontSize: 14, fontWeight: '600',
+  },
+  targetTextActive: {
+    color: '#fff',
   },
 });

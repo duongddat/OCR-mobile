@@ -113,9 +113,9 @@ export default function ScannerScreen() {
 
   // ─── Actions ──────────────────────────────────────────────────────────────
 
-  const recognizeImage = async (uri: string) => {
+  const recognizeImage = async (uri: string, scanType?: 'document' | 'card') => {
     // Luôn gửi ảnh lên server (BE) thay vì OCR cục bộ
-    await uploadToServer(uri, false);
+    await uploadToServer(uri, false, undefined, scanType);
   };
 
   const startDocumentScanner = async () => {
@@ -138,14 +138,14 @@ export default function ScannerScreen() {
     }
   };
 
-  const handleCustomScannerCapture = async (uri: string, corners?: any[]) => {
+  const handleCustomScannerCapture = async (uri: string, corners?: any[], type?: 'document' | 'card') => {
     setUseCustomScanner(false);
     // Tạm thời bỏ qua màn hình crop 4 góc (CropEditor) cho bản demo
     // Feed vào hệ thống OCR hiện tại
     setUseLegacyCamera(false);
     setIsPdf(false);
     setCapturedImage(uri);
-    await recognizeImage(uri);
+    await recognizeImage(uri, type);
   };
 
   const takeLegacyPicture = async () => {
@@ -197,7 +197,7 @@ export default function ScannerScreen() {
     }
   };
 
-  const uploadToServer = async (uri: string, isPdfFlag = false, originalName?: string) => {
+  const uploadToServer = async (uri: string, isPdfFlag = false, originalName?: string, scanType?: string) => {
     setIsProcessing(true);
     setOcrText('');
     setOcrDetails([]);
@@ -231,6 +231,9 @@ export default function ScannerScreen() {
 
       const formData = new FormData();
       formData.append('file', { uri: normalizedUri, name: filename, type } as unknown as Blob);
+      // if (scanType) {
+      //   formData.append('scanType', scanType);
+      // }
 
       const protocol = process.env.EXPO_PUBLIC_API_PROTOCOL ?? 'https';
       const host     = process.env.EXPO_PUBLIC_API_HOST ?? 'apiocr.aulacsoft.com';
