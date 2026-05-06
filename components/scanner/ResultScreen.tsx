@@ -1,12 +1,12 @@
 import { useState, useRef } from 'react';
 import {
   View, Text, TouchableOpacity, Image, StyleSheet,
-  Dimensions, Modal, ScrollView, Clipboard, Animated,
+  Dimensions, Modal, ScrollView, Clipboard,
 } from 'react-native';
 import { PinchGestureHandler, State } from 'react-native-gesture-handler';
 import { Ionicons } from '@expo/vector-icons';
 
-import { ACCENT, BG, SURFACE, BORDER } from './styles';
+import { ACCENT, BG, BORDER } from './styles';
 
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
 

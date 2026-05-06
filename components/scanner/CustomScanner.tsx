@@ -4,6 +4,7 @@ import {
   View,
   Text,
   TouchableOpacity,
+  useWindowDimensions,
 } from 'react-native';
 import {
   Camera,
@@ -14,7 +15,7 @@ import {
   useFrameOutput,
 } from 'react-native-vision-camera';
 import { Canvas, Path, Skia, Group, Rect } from '@shopify/react-native-skia';
-import {
+import Animated, {
   useSharedValue,
   useDerivedValue,
   withTiming,
@@ -24,7 +25,6 @@ import {
   useAnimatedStyle,
   useAnimatedReaction,
 } from 'react-native-reanimated';
-import Animated from 'react-native-reanimated';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 
 import { Ionicons } from '@expo/vector-icons';
@@ -107,6 +107,17 @@ function isRectLike(
   const minSide = target === 'card' ? 10 : 15;
   if (L.some((l) => l < minSide)) return false;
 
+  // ── 0. CONVEXITY: tứ giác phải LỒI — tất cả cross product cùng chiều ─
+  let crossSign = 0;
+  for (let i = 0; i < 4; i++) {
+    const si = S[i], sj = S[(i + 1) % 4];
+    const cross = si.x * sj.y - si.y * sj.x;
+    if (Math.abs(cross) < 0.5) continue; // bỏ qua nếu gần song song
+    const sign = cross > 0 ? 1 : -1;
+    if (crossSign === 0) { crossSign = sign; continue; }
+    if (sign !== crossSign) return false; // tứ giác lõm → loại bỏ
+  }
+
   // ── 1. SONG SONG: top ↔ bottom, right ↔ left ─────────────────────────
   // dot(unit(top), unit(-bottom)) > threshold  → hai cạnh đối gần song song
   const dot2D = (
@@ -118,14 +129,12 @@ function isRectLike(
   const parallelRL = dot2D(S[1].x, S[1].y, L[1], -S[3].x, -S[3].y, L[3]);
   
   // Nới lỏng độ song song để dễ bắt tài liệu khi cầm điện thoại nghiêng (perspective distortion)
-  // 0.65 = cho phép nghiêng tới ~49° (rất dễ bắt)
-  const minParallel = target === 'card' ? 0.85 : 0.65;
+  const minParallel = target === 'card' ? 0.55 : 0.30;
   if (parallelTB < minParallel || parallelRL < minParallel) return false;
 
   // ── 2. VUÔNG GÓC: các cặp cạnh liền kề ──────────────────────────────
-  // Nới lỏng để chấp nhận các góc nhọn/tù do phối cảnh (hình thang)
-  // doc: |cosA| < 0.55 → góc cho phép từ 56° đến 124° (rất linh hoạt)
-  const maxCos = target === 'card' ? 0.40 : 0.55;
+  // Nới lỏng góc vuông để chấp nhận các góc nhọn/tù do phối cảnh
+  const maxCos = target === 'card' ? 0.55 : 0.75;
   for (let i = 0; i < 4; i++) {
     const a = S[i], b = S[(i + 1) % 4];
     const lenA = L[i], lenB = L[(i + 1) % 4];
@@ -153,143 +162,143 @@ function isRectLike(
 }
 
 // ─── OpenCV detection (worklet) ───────────────────────────────────────────
- 
+
 function detectDocument(
   src: any,
   imgW: number,
   imgH: number,
   channels: number = 4,
   minAreaRatio: number = 0.06,
-  target: 'document' | 'card' = 'document',  // ✅ FIX: thêm tham số target
+  target: 'document' | 'card' = 'document',
 ): DocCorners | null {
   'worklet';
   const ids: string[] = [];
   const cleanup = () => { try { OpenCV.releaseBuffers(ids); } catch {} };
- 
+
   try {
-    const gray = OpenCV.createObject('mat' as ObjectType.Mat, imgH, imgW, 0);
+    const TARGET_W = 480;
+    const needsResize = imgW > TARGET_W;
+    const pW = needsResize ? TARGET_W : imgW;
+    const pH = needsResize ? Math.round(imgH * TARGET_W / imgW) : imgH;
+
+    let srcToProcess = src;
+    if (needsResize) {
+      const srcType = channels === 1 ? 0 : channels === 3 ? 16 : 24;
+      const small = OpenCV.createObject('mat' as ObjectType.Mat, pH, pW, srcType);
+      ids.push(small.id);
+      const smallSize = OpenCV.createObject('size' as ObjectType.Size, pW, pH);
+      ids.push(smallSize.id);
+      OpenCV.invoke('resize', src, small, smallSize, 0, 0, 1);
+      srcToProcess = small;
+    }
+
+    const gray = OpenCV.createObject('mat' as ObjectType.Mat, pH, pW, 0);
     ids.push(gray.id);
-    OpenCV.invoke('cvtColor', src, gray, channels === 3 ? 7 : 11);
- 
-    const blurred = OpenCV.createObject('mat' as ObjectType.Mat, imgH, imgW, 0);
+    OpenCV.invoke('cvtColor', srcToProcess, gray, channels === 3 ? 7 : 11);
+
+    // Dùng GaussianBlur 5x5 để làm mịn mặt bàn và các nhiễu nhỏ, bỏ convertScaleAbs để không làm lộ shadow
+    const blurred = OpenCV.createObject('mat' as ObjectType.Mat, pH, pW, 0);
     ids.push(blurred.id);
     const ksize = OpenCV.createObject('size' as ObjectType.Size, 5, 5);
     ids.push(ksize.id);
+    OpenCV.invoke('GaussianBlur', gray, blurred, ksize, 0);
 
-    // BUG-01 FIX: convertScaleAbs KHÔNG hỗ trợ in-place → dùng mat riêng
-    let srcForBlur = gray;
-    if (target === 'card') {
-      const contrasted = OpenCV.createObject('mat' as ObjectType.Mat, imgH, imgW, 0);
-      ids.push(contrasted.id);
-      OpenCV.invoke('convertScaleAbs', gray, contrasted, 1.5, 0);
-      srcForBlur = contrasted;
-    }
-
-    OpenCV.invoke('GaussianBlur', srcForBlur, blurred, ksize, 0);
- 
-    const edges = OpenCV.createObject('mat' as ObjectType.Mat, imgH, imgW, 0);
+    // TĂNG MẠNH ngưỡng Canny: Chỉ bắt viền sắc nét (mép giấy/thẻ thật), bỏ qua bóng đổ mờ
+    const edges = OpenCV.createObject('mat' as ObjectType.Mat, pH, pW, 0);
     ids.push(edges.id);
-    // Thẻ thường có nền trắng/sáng trên bàn tối → giảm ngưỡng Canny
-    const cannyLow  = target === 'card' ? 20 : 30;
-    const cannyHigh = target === 'card' ? 80 : 100;
+    const cannyLow  = target === 'card' ? 40 : 50;
+    const cannyHigh = target === 'card' ? 120 : 150;
     OpenCV.invoke('Canny', blurred, edges, cannyLow, cannyHigh);
- 
-    const kernelSize = OpenCV.createObject('size' as ObjectType.Size, 5, 5);
-    ids.push(kernelSize.id);
-    const kernel = OpenCV.invoke(
-      'getStructuringElement',
-      0 as MorphShapes.MORPH_RECT,
-      kernelSize,
-    ) as any;
-    ids.push(kernel.id);
- 
-    const closed = OpenCV.createObject('mat' as ObjectType.Mat, imgH, imgW, 0);
-    ids.push(closed.id);
-    OpenCV.invoke('morphologyEx', edges, closed, 3 as MorphTypes.MORPH_CLOSE, kernel);
 
-    // CR-01 FIX: morphologyEx in-place không được hỗ trợ → dùng mat riêng cho dilate
-    let edgeMask = closed;
-    if (target === 'card') {
-      const dilateSize = OpenCV.createObject('size' as ObjectType.Size, 3, 3);
-      ids.push(dilateSize.id);
-      const dilateKernel = OpenCV.invoke(
-        'getStructuringElement',
-        0 as MorphShapes.MORPH_RECT,
-        dilateSize,
-      ) as any;
-      ids.push(dilateKernel.id);
-      const dilated = OpenCV.createObject('mat' as ObjectType.Mat, imgH, imgW, 0);
-      ids.push(dilated.id);
-      OpenCV.invoke('morphologyEx', closed, dilated, 1 as MorphTypes.MORPH_DILATE, dilateKernel);
-      edgeMask = dilated;
-    }
- 
+    // Chỉ dùng CLOSE 5x5 để nối liền nét Canny bị đứt, KHÔNG DÙNG DILATE (tránh làm phình khung ra ngoài)
+    const closeSize = OpenCV.createObject('size' as ObjectType.Size, 5, 5);
+    ids.push(closeSize.id);
+    const closeKernel = OpenCV.invoke('getStructuringElement', 0 as MorphShapes.MORPH_RECT, closeSize) as any;
+    ids.push(closeKernel.id);
+    const closed = OpenCV.createObject('mat' as ObjectType.Mat, pH, pW, 0);
+    ids.push(closed.id);
+    OpenCV.invoke('morphologyEx', edges, closed, 3 as MorphTypes.MORPH_CLOSE, closeKernel);
+
     const contours = OpenCV.createObject('mat_vector' as ObjectType.MatVector);
     ids.push(contours.id);
     OpenCV.invoke(
-      'findContours', edgeMask, contours,
+      'findContours', closed, contours,
       0 as RetrievalModes.RETR_EXTERNAL,
       2 as ContourApproximationModes.CHAIN_APPROX_SIMPLE,
     );
- 
+
     const contourJs = OpenCV.toJSValue(contours) as { array: any[] };
     const count     = contourJs.array.length;
-    const minArea   = imgW * imgH * minAreaRatio;
-    // BUG-02 FIX: card maxArea 0.55 (thẻ không bao giờ chiếm >55% frame)
-    // document maxArea 0.90 (giấy có thể gần full frame)
-    const maxArea   = imgW * imgH * (target === 'card' ? 0.55 : 0.90);
+    const minArea   = pW * pH * minAreaRatio;
+    const maxArea   = pW * pH * (target === 'card' ? 0.95 : 1.01);
     let best: DocCorners | null = null;
     let bestArea = 0;
- 
+
     for (let i = 0; i < count; i++) {
-      const contour = OpenCV.copyObjectFromVector(contours, i);
-      ids.push(contour.id);
- 
-      const area = (OpenCV.invoke('contourArea', contour) as { value: number }).value;
-      if (area <= minArea || area >= maxArea || area <= bestArea) continue;
- 
-      const peri = (OpenCV.invoke('arcLength', contour, true) as { value: number }).value;
-      const approx = OpenCV.createObject('mat' as ObjectType.Mat, 0, 0, 0);
-      ids.push(approx.id);
-      
-      // WARN-03 FIX: card cần epsilon nhỏ (cạnh thẳng cứng), doc dùng epsilon lớn hơn (giấy cong)
-      const epsilons = target === 'card'
-        ? [0.02, 0.03, 0.04, 0.05]
-        : [0.02, 0.035, 0.05, 0.065, 0.08, 0.10, 0.13];
-      let numPts = 999;
-      let buf: any = null;
+      const loopIds: string[] = [];
+      try {
+        const contour = OpenCV.copyObjectFromVector(contours, i);
+        loopIds.push(contour.id);
 
-      for (let ei = 0; ei < epsilons.length; ei++) {
-        OpenCV.invoke('approxPolyDP', contour, approx, epsilons[ei] * peri, true);
-        buf = OpenCV.matToBuffer(approx, 'int32');
-        numPts = buf.rows; // rows = số điểm (approxPolyDP trả N×1×2)
-        if (numPts <= 4) break;
+        const area = (OpenCV.invoke('contourArea', contour) as { value: number }).value;
+        if (area <= minArea || area >= maxArea || area <= bestArea) continue;
+
+        const approx = OpenCV.createObject('mat' as ObjectType.Mat, 0, 0, 0);
+        loopIds.push(approx.id);
+
+        const epsilons = target === 'card'
+          ? [0.01, 0.015, 0.02, 0.03, 0.04, 0.05]
+          : [0.02, 0.04, 0.06, 0.08, 0.10, 0.13, 0.16];
+        
+        let numPts = 999;
+        let buf: any = null;
+
+        // BÁM SÁT BIÊN THỰC TẾ: Dùng ConvexHull bọc toàn bộ contour thành khối lồi → bỏ qua nhiễu nội bộ
+        const hull = OpenCV.createObject('mat' as ObjectType.Mat, 0, 0, 0);
+        loopIds.push(hull.id);
+        OpenCV.invoke('convexHull', contour, hull);
+
+        const peri = (OpenCV.invoke('arcLength', hull, true) as { value: number }).value;
+        for (let ei = 0; ei < epsilons.length; ei++) {
+          OpenCV.invoke('approxPolyDP', hull, approx, epsilons[ei] * peri, true);
+          buf = OpenCV.matToBuffer(approx, 'int32');
+          numPts = buf.rows;
+          if (numPts <= 4) break;
+        }
+
+        if (numPts !== 4 || !buf || buf.buffer.length < 8) continue;
+
+        const raw: { x: number; y: number }[] = [
+          { x: buf.buffer[0] / pW, y: buf.buffer[1] / pH },
+          { x: buf.buffer[2] / pW, y: buf.buffer[3] / pH },
+          { x: buf.buffer[4] / pW, y: buf.buffer[5] / pH },
+          { x: buf.buffer[6] / pW, y: buf.buffer[7] / pH },
+        ];
+        
+        // Thu nhỏ (shrink) khung vào trong 1.5% để chắc chắn cắt bỏ viền mờ / bóng đen bám sát mép
+        const center = raw.reduce((acc, val) => ({ x: acc.x + val.x / 4, y: acc.y + val.y / 4 }), { x: 0, y: 0 });
+        const shrinkFactor = 0.985;
+        const adjustedRaw = raw.map(pt => ({
+          x: center.x + (pt.x - center.x) * shrinkFactor,
+          y: center.y + (pt.y - center.y) * shrinkFactor
+        }));
+
+        adjustedRaw.sort((a, b) => (a.x + a.y) - (b.x + b.y));
+        const tl = adjustedRaw[0];
+        const br = adjustedRaw[3];
+        adjustedRaw.sort((a, b) => (a.x - a.y) - (b.x - b.y));
+        const bl = adjustedRaw[0];
+        const tr = adjustedRaw[3];
+
+        if (!isRectLike(tl, tr, br, bl, pW, pH, target)) continue;
+
+        best     = { tl, tr, br, bl };
+        bestArea = area;
+      } finally {
+        try { OpenCV.releaseBuffers(loopIds); } catch {}
       }
-
-      // STRICT: chỉ chấp nhận đúng 4 điểm + đủ buffer
-      if (numPts !== 4 || !buf || buf.buffer.length < 8) continue;
-
-      // Sắp xếp 4 góc theo thứ tự tl / tr / br / bl
-      const raw: { x: number; y: number }[] = [
-        { x: buf.buffer[0] / imgW, y: buf.buffer[1] / imgH },
-        { x: buf.buffer[2] / imgW, y: buf.buffer[3] / imgH },
-        { x: buf.buffer[4] / imgW, y: buf.buffer[5] / imgH },
-        { x: buf.buffer[6] / imgW, y: buf.buffer[7] / imgH },
-      ];
-      raw.sort((a, b) => (a.x + a.y) - (b.x + b.y));
-      const tl = raw[0];
-      const br = raw[3];
-      raw.sort((a, b) => (a.x - a.y) - (b.x - b.y));
-      const bl = raw[0];
-      const tr = raw[3];
-
-      // Xác thực hình chữ nhật: song song + vuông góc + tỷ lệ đúng
-      if (!isRectLike(tl, tr, br, bl, imgW, imgH, target)) continue;  // ✅ FIX: truyền đúng target
-
-      best     = { tl, tr, br, bl };
-      bestArea = area;
     }
- 
+
     cleanup();
     return best;
   } catch (e: any) {
@@ -298,9 +307,9 @@ function detectDocument(
     return null;
   }
 }
- 
+
 // ─── OpenCV detection (JS thread) ─────────────────────────────────────────
- 
+
 function detectDocumentJS(
   src: any,
   imgW: number,
@@ -311,126 +320,126 @@ function detectDocumentJS(
 ): DocCorners | null {
   const ids: string[] = [];
   const cleanup = () => { try { OpenCV.releaseBuffers(ids); } catch {} };
- 
+
   try {
-    const gray = OpenCV.createObject('mat' as ObjectType.Mat, imgH, imgW, 0);
+    const TARGET_W = 800;
+    const needsResize = imgW > TARGET_W;
+    const pW = needsResize ? TARGET_W : imgW;
+    const pH = needsResize ? Math.round(imgH * TARGET_W / imgW) : imgH;
+
+    let srcToProcess = src;
+    if (needsResize) {
+      const smallSize = OpenCV.createObject('size' as ObjectType.Size, pW, pH);
+      ids.push(smallSize.id);
+      const srcType = channels === 1 ? 0 : channels === 3 ? 16 : 24;
+      const small = OpenCV.createObject('mat' as ObjectType.Mat, pH, pW, srcType);
+      ids.push(small.id);
+      OpenCV.invoke('resize', src, small, smallSize, 0, 0, 1);
+      srcToProcess = small;
+    }
+
+    const gray = OpenCV.createObject('mat' as ObjectType.Mat, pH, pW, 0);
     ids.push(gray.id);
-    OpenCV.invoke('cvtColor', src, gray, channels === 3 ? 7 : 11);
- 
-    const blurred = OpenCV.createObject('mat' as ObjectType.Mat, imgH, imgW, 0);
+    OpenCV.invoke('cvtColor', srcToProcess, gray, channels === 3 ? 7 : 11);
+
+    const blurred = OpenCV.createObject('mat' as ObjectType.Mat, pH, pW, 0);
     ids.push(blurred.id);
     const ksize = OpenCV.createObject('size' as ObjectType.Size, 5, 5);
     ids.push(ksize.id);
+    OpenCV.invoke('GaussianBlur', gray, blurred, ksize, 0);
 
-    // BUG-01 FIX: convertScaleAbs KHÔNG hỗ trợ in-place → dùng mat riêng
-    let srcForBlur = gray;
-    if (target === 'card') {
-      const contrasted = OpenCV.createObject('mat' as ObjectType.Mat, imgH, imgW, 0);
-      ids.push(contrasted.id);
-      OpenCV.invoke('convertScaleAbs', gray, contrasted, 1.5, 0);
-      srcForBlur = contrasted;
-    }
-
-    OpenCV.invoke('GaussianBlur', srcForBlur, blurred, ksize, 0);
- 
-    const edges = OpenCV.createObject('mat' as ObjectType.Mat, imgH, imgW, 0);
+    const edges = OpenCV.createObject('mat' as ObjectType.Mat, pH, pW, 0);
     ids.push(edges.id);
-    const cannyLow  = target === 'card' ? 20 : 30;
-    const cannyHigh = target === 'card' ? 80 : 100;
+    const cannyLow  = target === 'card' ? 40 : 50;
+    const cannyHigh = target === 'card' ? 120 : 150;
     OpenCV.invoke('Canny', blurred, edges, cannyLow, cannyHigh);
- 
-    const kernelSize = OpenCV.createObject('size' as ObjectType.Size, 5, 5);
-    ids.push(kernelSize.id);
-    const kernel = OpenCV.invoke(
-      'getStructuringElement',
-      0 as MorphShapes.MORPH_RECT,
-      kernelSize,
-    ) as any;
-    ids.push(kernel.id);
- 
-    const closed = OpenCV.createObject('mat' as ObjectType.Mat, imgH, imgW, 0);
-    ids.push(closed.id);
-    OpenCV.invoke('morphologyEx', edges, closed, 3 as MorphTypes.MORPH_CLOSE, kernel);
 
-    // CR-01 FIX: morphologyEx in-place không được hỗ trợ → dùng mat riêng
-    let edgeMask = closed;
-    if (target === 'card') {
-      const dilateSize = OpenCV.createObject('size' as ObjectType.Size, 3, 3);
-      ids.push(dilateSize.id);
-      const dilateKernel = OpenCV.invoke(
-        'getStructuringElement',
-        0 as MorphShapes.MORPH_RECT,
-        dilateSize,
-      ) as any;
-      ids.push(dilateKernel.id);
-      const dilated = OpenCV.createObject('mat' as ObjectType.Mat, imgH, imgW, 0);
-      ids.push(dilated.id);
-      OpenCV.invoke('morphologyEx', closed, dilated, 1 as MorphTypes.MORPH_DILATE, dilateKernel);
-      edgeMask = dilated;
-    }
- 
+    const closeSize = OpenCV.createObject('size' as ObjectType.Size, 5, 5);
+    ids.push(closeSize.id);
+    const closeKernel = OpenCV.invoke('getStructuringElement', 0 as MorphShapes.MORPH_RECT, closeSize) as any;
+    ids.push(closeKernel.id);
+    const closed = OpenCV.createObject('mat' as ObjectType.Mat, pH, pW, 0);
+    ids.push(closed.id);
+    OpenCV.invoke('morphologyEx', edges, closed, 3 as MorphTypes.MORPH_CLOSE, closeKernel);
+
     const contours = OpenCV.createObject('mat_vector' as ObjectType.MatVector);
     ids.push(contours.id);
     OpenCV.invoke(
-      'findContours', edgeMask, contours,
+      'findContours', closed, contours,
       0 as RetrievalModes.RETR_EXTERNAL,
       2 as ContourApproximationModes.CHAIN_APPROX_SIMPLE,
     );
- 
+
     const contourJs = OpenCV.toJSValue(contours) as { array: any[] };
     const count     = contourJs.array.length;
-    const minArea   = imgW * imgH * minAreaRatio;
-    // BUG-02 FIX: card maxArea 0.55, document 0.90
-    const maxArea   = imgW * imgH * (target === 'card' ? 0.55 : 0.90);
+    const minArea   = pW * pH * minAreaRatio;
+    const maxArea   = pW * pH * (target === 'card' ? 0.95 : 1.01);
     let best: DocCorners | null = null;
     let bestArea = 0;
- 
+
     for (let i = 0; i < count; i++) {
-      const contour = OpenCV.copyObjectFromVector(contours, i);
-      ids.push(contour.id);
- 
-      const area = (OpenCV.invoke('contourArea', contour) as { value: number }).value;
-      if (area <= minArea || area >= maxArea || area <= bestArea) continue;
- 
-      const peri = (OpenCV.invoke('arcLength', contour, true) as { value: number }).value;
-      const approx = OpenCV.createObject('mat' as ObjectType.Mat, 0, 0, 0);
-      ids.push(approx.id);
-      
-      // WARN-03 FIX: card dùng epsilon nhỏ hơn (cạnh cứng thẳng)
-      const epsilons = target === 'card'
-        ? [0.02, 0.03, 0.04, 0.05]
-        : [0.02, 0.035, 0.05, 0.065, 0.08, 0.10, 0.13];
-      let numPts = 999;
-      let buf: any = null;
+      const loopIds: string[] = [];
+      try {
+        const contour = OpenCV.copyObjectFromVector(contours, i);
+        loopIds.push(contour.id);
 
-      for (let ei = 0; ei < epsilons.length; ei++) {
-        OpenCV.invoke('approxPolyDP', contour, approx, epsilons[ei] * peri, true);
-        buf = OpenCV.matToBuffer(approx, 'int32');
-        numPts = buf.rows; // rows = số điểm
-        if (numPts <= 4) break;
+        const area = (OpenCV.invoke('contourArea', contour) as { value: number }).value;
+        if (area <= minArea || area >= maxArea || area <= bestArea) continue;
+
+        const approx = OpenCV.createObject('mat' as ObjectType.Mat, 0, 0, 0);
+        loopIds.push(approx.id);
+
+        const epsilons = target === 'card'
+          ? [0.02, 0.03, 0.04, 0.05, 0.06, 0.08]
+          : [0.02, 0.04, 0.06, 0.08, 0.10, 0.13, 0.16];
+        
+        let numPts = 999;
+        let buf: any = null;
+
+        const hull = OpenCV.createObject('mat' as ObjectType.Mat, 0, 0, 0);
+        loopIds.push(hull.id);
+        OpenCV.invoke('convexHull', contour, hull);
+
+        const peri = (OpenCV.invoke('arcLength', hull, true) as { value: number }).value;
+        for (let ei = 0; ei < epsilons.length; ei++) {
+          OpenCV.invoke('approxPolyDP', hull, approx, epsilons[ei] * peri, true);
+          buf = OpenCV.matToBuffer(approx, 'int32');
+          numPts = buf.rows;
+          if (numPts <= 4) break;
+        }
+
+        if (numPts !== 4 || !buf || buf.buffer.length < 8) continue;
+
+        const raw: { x: number; y: number }[] = [
+          { x: buf.buffer[0] / pW, y: buf.buffer[1] / pH },
+          { x: buf.buffer[2] / pW, y: buf.buffer[3] / pH },
+          { x: buf.buffer[4] / pW, y: buf.buffer[5] / pH },
+          { x: buf.buffer[6] / pW, y: buf.buffer[7] / pH },
+        ];
+        
+        const center = raw.reduce((acc, val) => ({ x: acc.x + val.x / 4, y: acc.y + val.y / 4 }), { x: 0, y: 0 });
+        const shrinkFactor = 0.985;
+        const adjustedRaw = raw.map(pt => ({
+          x: center.x + (pt.x - center.x) * shrinkFactor,
+          y: center.y + (pt.y - center.y) * shrinkFactor
+        }));
+
+        adjustedRaw.sort((a, b) => (a.x + a.y) - (b.x + b.y));
+        const tl = adjustedRaw[0];
+        const br = adjustedRaw[3];
+        adjustedRaw.sort((a, b) => (a.x - a.y) - (b.x - b.y));
+        const bl = adjustedRaw[0];
+        const tr = adjustedRaw[3];
+
+        if (!isRectLike(tl, tr, br, bl, pW, pH, target)) continue;
+
+        best     = { tl, tr, br, bl };
+        bestArea = area;
+      } finally {
+        try { OpenCV.releaseBuffers(loopIds); } catch {}
       }
-
-      if (numPts !== 4 || !buf || buf.buffer.length < 8) continue;
-
-      const raw: { x: number; y: number }[] = [
-        { x: buf.buffer[0] / imgW, y: buf.buffer[1] / imgH },
-        { x: buf.buffer[2] / imgW, y: buf.buffer[3] / imgH },
-        { x: buf.buffer[4] / imgW, y: buf.buffer[5] / imgH },
-        { x: buf.buffer[6] / imgW, y: buf.buffer[7] / imgH },
-      ];
-      raw.sort((a, b) => (a.x + a.y) - (b.x + b.y));
-      const tl = raw[0];
-      const br = raw[3];
-      raw.sort((a, b) => (a.x - a.y) - (b.x - b.y));
-      const bl = raw[0];
-      const tr = raw[3];
-
-      if (!isRectLike(tl, tr, br, bl, imgW, imgH, target)) continue;
-
-      best     = { tl, tr, br, bl };
-      bestArea = area;
     }
- 
+
     cleanup();
     return best;
   } catch (e: any) {
@@ -439,7 +448,8 @@ function detectDocumentJS(
     return null;
   }
 }
- 
+
+
 // ─── Helpers ──────────────────────────────────────────────────────────────
  
 function normalizedToScreenCorners(c: DocCorners, frameAspect: number, screenW: number, screenH: number) {
@@ -499,8 +509,6 @@ function buildDotPath(x: number, y: number, r = 7) {
 }
  
 // ─── Component ────────────────────────────────────────────────────────────
- 
-import { useWindowDimensions } from 'react-native';
 
 export default function CustomScanner({ onCapture, onCancel }: CustomScannerProps) {
   const { width: SCREEN_W, height: SCREEN_H } = useWindowDimensions();
@@ -624,15 +632,12 @@ export default function CustomScanner({ onCapture, onCancel }: CustomScannerProp
     const movedRaw = prevRaw && rawCorners ? cornersDistance(prevRaw, rawCorners) : Infinity;
 
     // ── Adaptive EMA ────────────────────────────────────────────────────
-    // Alpha thấp = smoothing mạnh (overlay ổn định), alpha cao = bắt kịp nhanh
-    //   movedRaw < 0.03 → tài liệu gần như đứng yên → alpha 0.10 (rất ổn định)
-    //   movedRaw < 0.12 → chuyển động nhẹ          → alpha 0.35
-    //   movedRaw >= 0.12 → chuyển động lớn         → alpha 0.75 (bắt kịp nhanh)
+    // Alpha thấp = smoothing mạnh (overlay mượt), alpha cao = bắt kịp nhanh
     let finalCorners = rawCorners;
     if (rawCorners && prev) {
-      const alpha = movedRaw < 0.03 ? 0.10
-                  : movedRaw < 0.12 ? 0.35
-                  : 0.75;
+      const alpha = movedRaw < 0.02 ? 0.50
+                  : movedRaw < 0.10 ? 0.35
+                  : 0.80;
       finalCorners = {
         tl: { x: prev.tl.x + (rawCorners.tl.x - prev.tl.x) * alpha, y: prev.tl.y + (rawCorners.tl.y - prev.tl.y) * alpha },
         tr: { x: prev.tr.x + (rawCorners.tr.x - prev.tr.x) * alpha, y: prev.tr.y + (rawCorners.tr.y - prev.tr.y) * alpha },
@@ -694,14 +699,15 @@ export default function CustomScanner({ onCapture, onCancel }: CustomScannerProp
     docMinY.value = Math.min(sc.tl.y, sc.tr.y, sc.bl.y, sc.br.y);
     docMaxY.value = Math.max(sc.tl.y, sc.tr.y, sc.bl.y, sc.br.y);
 
-    const currentlyStable = movedRaw < 0.05;
+    // Nới lỏng ngưỡng stable lên 8% để dễ auto-capture khi dí sát
+    const currentlyStable = movedRaw < 0.08;
 
     if (currentlyStable) {
       stableFrameCount.current++;
-      // Lock corners sau 3 frame ổn định liên tiếp (~1.2s ở 4fps)
+      // Lock corners sau 3 frame ổn định liên tiếp
       if (stableFrameCount.current >= 3) {
         if (!lockedCornersRef.current) {
-          lockedCornersRef.current = finalCorners;
+          lockedCornersRef.current = rawCorners!;
         }
         // Hiển thị locked corners — overlay đứng yên hoàn toàn khi stable
         setDetectedCorners(lockedCornersRef.current);
@@ -779,7 +785,7 @@ export default function CustomScanner({ onCapture, onCancel }: CustomScannerProp
       'worklet';
       if (!isActiveShared.value) { frame.dispose(); return; }
  
-      frameCounterShared.value = (frameCounterShared.value + 1) % 4;
+      frameCounterShared.value = (frameCounterShared.value + 1) % 3; // xử lý mỗi 3 frame (~10fps ở 30fps camera)
       if (frameCounterShared.value !== 0) { frame.dispose(); return; }
  
       frameAspectShared.value = frame.width / frame.height;
@@ -819,7 +825,21 @@ export default function CustomScanner({ onCapture, onCancel }: CustomScannerProp
  
       const pFile  = photoFile as any;
       const uri    = `file://${photoFile.filePath}`;
+      
       let accurateCorners: DocCorners | null = detectedCorners;
+      if (detectedCorners) {
+        const frameIsLandscape = frameAspectShared.value > 1;
+        const screenIsPortrait = SCREEN_W < SCREEN_H;
+        if (frameIsLandscape && screenIsPortrait) {
+          const rot = (p: {x:number, y:number}) => ({ x: p.y, y: 1 - p.x });
+          accurateCorners = {
+            tl: rot(detectedCorners.tr),
+            tr: rot(detectedCorners.br),
+            br: rot(detectedCorners.bl),
+            bl: rot(detectedCorners.tl),
+          };
+        }
+      }
  
       try {
         const thumb = await manipulateAsync(

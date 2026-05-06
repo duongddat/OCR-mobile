@@ -11,8 +11,6 @@ import * as ImagePicker from 'expo-image-picker';
 import * as DocumentPicker from 'expo-document-picker';
 import Constants from 'expo-constants';
 import { Ionicons } from '@expo/vector-icons';
-
-import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
 import { saveToHistory, loadHistory, deleteRecord, clearHistory, formatDate, ScanRecord } from '@/utils/history';
 import { styles, ACCENT } from '@/components/scanner/styles';
 
@@ -22,14 +20,7 @@ import ProcessingScreen from '@/components/scanner/ProcessingScreen';
 import ResultScreen from '@/components/scanner/ResultScreen';
 import CustomScanner from '@/components/scanner/CustomScanner';
 
-// Native DocumentScanner — null on Expo Go
-let DocumentScanner: any = null;
-try {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  DocumentScanner = require('react-native-document-scanner-plugin').default;
-} catch {
-  console.log('Không thể tải DocumentScanner Native (Expo Go)');
-}
+// Removed unused Native DocumentScanner
 
 const isExpoGo = Constants.appOwnership === 'expo';
 
@@ -140,8 +131,6 @@ export default function ScannerScreen() {
 
   const handleCustomScannerCapture = async (uri: string, corners?: any[], type?: 'document' | 'card') => {
     setUseCustomScanner(false);
-    // Tạm thời bỏ qua màn hình crop 4 góc (CropEditor) cho bản demo
-    // Feed vào hệ thống OCR hiện tại
     setUseLegacyCamera(false);
     setIsPdf(false);
     setCapturedImage(uri);
@@ -203,18 +192,9 @@ export default function ScannerScreen() {
     setOcrDetails([]);
     setTotalPages(0);
 
-    // ─ Auto-rotate image based on EXIF before uploading ─────────────────────
-    // manipulateAsync with an empty actions array bakes the EXIF rotation
-    // into the pixel data, producing an upright image the BE can read
+    // ─ Auto-rotate removed to improve speed ──────────────────────────────
+    // CropEditor already outputs an upright image without EXIF rotation.
     let finalUri = uri;
-    if (!isPdfFlag) {
-      try {
-        const rotated = await manipulateAsync(uri, [], { format: SaveFormat.JPEG, compress: 0.92 });
-        finalUri = rotated.uri;
-      } catch (rotErr) {
-        console.warn('[uploadToServer] rotate step failed, using original uri:', rotErr);
-      }
-    }
 
     // Chuẩn hóa URI trên Android
     const normalizedUri = Platform.OS === 'android' && !finalUri.startsWith('file://') && !finalUri.startsWith('content://') && finalUri.startsWith('/')

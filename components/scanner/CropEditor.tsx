@@ -25,6 +25,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as FileSystem from 'expo-file-system/legacy';
 import { OpenCV, ObjectType } from 'react-native-fast-opencv';
 import type { DocCorners } from './CustomScanner';
+import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
 
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
 
@@ -76,13 +77,6 @@ function normalizedToScreen(norm: Point, rect: DisplayRect, bounds: HandleBounds
   };
 }
 
-function buildPath(tlP: Point, trP: Point, brP: Point, blP: Point) {
-  const p = Skia.Path.Make();
-  p.moveTo(tlP.x, tlP.y); p.lineTo(trP.x, trP.y);
-  p.lineTo(brP.x, brP.y); p.lineTo(blP.x, blP.y);
-  p.close();
-  return p;
-}
 
 /**
  * Parse JPEG EXIF orientation tag from a base64-encoded JPEG.
@@ -169,6 +163,8 @@ export default function CropEditor({
 }: CropEditorProps) {
   const insets = useSafeAreaInsets();
 
+  const [currentImageUri, setCurrentImageUri] = React.useState(imageUri);
+  const [useInitial, setUseInitial] = React.useState(true);
   const [displayRect, setDisplayRect] = React.useState<DisplayRect | null>(null);
   const [imageSize,   setImageSize]   = React.useState<{ width: number; height: number } | null>(null);
   const [isCropping,  setIsCropping]  = React.useState(false);
@@ -186,9 +182,19 @@ export default function CropEditor({
 
   const onImageLoad = React.useCallback(
     (e: { nativeEvent: { source: { width: number; height: number } } }) => {
-      const { width: imgW, height: imgH } = e.nativeEvent.source;
-      setImageSize({ width: imgW, height: imgH });
-      setDisplayRect(getContainRect(imgW, imgH));
+      const { width: rawW, height: rawH } = e.nativeEvent.source;
+      setImageSize({ width: rawW, height: rawH });
+
+      // React Native Image onLoad often returns raw unrotated dimensions,
+      // but renders the image with EXIF rotation.
+      // If screen is portrait but image size is landscape, assume it will be rendered as portrait.
+      let dispW = rawW;
+      let dispH = rawH;
+      if (SCREEN_W < SCREEN_H && rawW > rawH) {
+        dispW = rawH;
+        dispH = rawW;
+      }
+      setDisplayRect(getContainRect(dispW, dispH));
     },
     [],
   );
@@ -206,7 +212,7 @@ export default function CropEditor({
     };
     setHandleBounds(bounds);
 
-    if (initialCorners) {
+    if (initialCorners && useInitial) {
       // initialCorners are in photo space (0-1) — map directly into contain-rect screen space
       tl.value = normalizedToScreen(initialCorners.tl, displayRect, bounds);
       tr.value = normalizedToScreen(initialCorners.tr, displayRect, bounds);
@@ -238,13 +244,13 @@ export default function CropEditor({
    *  6. saveMatToFile → return URI
    */
   const handleCrop = async () => {
-    if (!imageSize || !displayRect) { onConfirm(imageUri); return; }
+    if (!imageSize || !displayRect) { onConfirm(currentImageUri); return; }
     setIsCropping(true);
     const ids: string[] = [];
 
     try {
       // Step 1: Read JPEG to base64
-      const b64 = await FileSystem.readAsStringAsync(imageUri, {
+      const b64 = await FileSystem.readAsStringAsync(currentImageUri, {
         encoding: FileSystem.EncodingType.Base64,
       });
 
@@ -260,21 +266,24 @@ export default function CropEditor({
       const matH = probe.rows;   // true height of raw JPEG pixel data
       console.log('[CropEditor] matW×matH:', matW, matH, '  onLoad imgW×imgH:', imageSize.width, imageSize.height);
 
-      // Step 4: Decide which displayRect the handles were actually drawn in.
+      // Step 4: Map handle screen positions → raw Mat pixel coordinates.
       //
-      // React Native Image may report onLoad dimensions that are either:
-      //  (a) EXIF-corrected (portrait: 3000×4000) → same as mat is NOT (mat is landscape 4000×3000)
-      //  (b) Raw file dims   (landscape: 4000×3000) → matches mat exactly
+      // imageSize is now always the EXIF-corrected display size (portrait) because
+      // onImageLoad swaps raw dims when the camera was landscape (see above).
+      // The raw Mat from base64ToMat is still in the original file orientation
+      // (landscape for a portrait shot, EXIF 6/8).
       //
-      // We detect the mismatch: if imageSize matches mat dims, use imageSize as-is.
-      // If imageSize is the SWAPPED version of mat dims, swap back for coordinate mapping.
+      // Possible relationships between imageSize and Mat:
+      //  (a) imageSize == mat dims  → platform reported raw dims AND our correction
+      //                               failed to swap (shouldn't happen with the fix,
+      //                               but keep as safe fallback)
+      //  (b) imageSize == swapped mat dims (normal case) → use imageSize directly
       const imgMatchesMat = (imageSize.width === matW && imageSize.height === matH);
       const imgIsSwapped  = (imageSize.width === matH && imageSize.height === matW);
 
-      // The "display" dims used by RNImage (what the user sees):
-      // RNImage always shows EXIF-corrected dims. If onLoad gave raw (matches mat),
-      // we need the corrected dims for mapping; if onLoad gave corrected, use directly.
-      const dispW = imgMatchesMat ? matH : imageSize.width;   // swap if raw
+      // dispW/dispH = the dimensions the user sees the image at (portrait for a portrait shot).
+      // If somehow imageSize still matches raw mat (fallback), swap to get display dims.
+      const dispW = imgMatchesMat ? matH : imageSize.width;
       const dispH = imgMatchesMat ? matW : imageSize.height;
 
       // Recompute contain-rect for the actual DISPLAYED dimensions
@@ -387,7 +396,7 @@ export default function CropEditor({
       onConfirm(outUri);
     } catch (e) {
       console.error('[CropEditor] warp failed:', e);
-      onConfirm(imageUri);
+      onConfirm(currentImageUri);
     } finally {
       setIsCropping(false);
       try { OpenCV.releaseBuffers(ids); } catch {}
@@ -396,10 +405,29 @@ export default function CropEditor({
 
 
 
+  const handleRotate = async () => {
+    if (isCropping) return;
+    setIsCropping(true);
+    try {
+      const manipResult = await manipulateAsync(
+        currentImageUri,
+        [{ rotate: 90 }],
+        { format: SaveFormat.JPEG, compress: 1 }
+      );
+      setCurrentImageUri(manipResult.uri);
+      setUseInitial(false);
+      cornersPositioned.current = false;
+    } catch (e) {
+      console.warn('[CropEditor] Rotate failed', e);
+    } finally {
+      setIsCropping(false);
+    }
+  };
+
   return (
     <GestureHandlerRootView style={s.container}>
       <RNImage
-        source={{ uri: imageUri }}
+        source={{ uri: currentImageUri }}
         style={StyleSheet.absoluteFill}
         resizeMode="contain"
         onLoad={onImageLoad}
@@ -421,7 +449,12 @@ export default function CropEditor({
           <Text style={s.headerBtnText}>Huỷ</Text>
         </TouchableOpacity>
 
-        <Text style={s.headerTitle}>Căn chỉnh tài liệu</Text>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+          <Text style={s.headerTitle}>Căn chỉnh</Text>
+          <TouchableOpacity style={s.rotateBtn} onPress={handleRotate} disabled={isCropping}>
+            <Ionicons name="refresh" size={18} color="#fff" />
+          </TouchableOpacity>
+        </View>
 
         <TouchableOpacity
           style={[s.headerBtn, s.headerBtnConfirm, isCropping && s.btnDisabled]}
@@ -440,7 +473,7 @@ export default function CropEditor({
 
       <View style={[s.badge, { bottom: insets.bottom + 32 }]}>
         <Ionicons name="move-outline" size={15} color="rgba(255,255,255,0.7)" />
-        <Text style={s.badgeText}>Kéo các góc để căn chỉnh vùng crop</Text>
+        <Text style={s.badgeText}>Kéo góc để căn vùng cắt • Xoay tài liệu theo chiều dọc!</Text>
       </View>
     </GestureHandlerRootView>
   );
@@ -467,6 +500,11 @@ const s = StyleSheet.create({
   btnDisabled:    { opacity: 0.5 },
   headerBtnText:  { color: '#fff', fontSize: 15, fontWeight: '600' },
   headerTitle:    { color: '#fff', fontSize: 15, fontWeight: '700' },
+  rotateBtn: {
+    width: 32, height: 32, borderRadius: 16,
+    backgroundColor: 'rgba(255,255,255,0.2)',
+    justifyContent: 'center', alignItems: 'center',
+  },
   handleWrap: {
     position: 'absolute', width: HANDLE_SIZE, height: HANDLE_SIZE,
     justifyContent: 'center', alignItems: 'center', zIndex: 5,
