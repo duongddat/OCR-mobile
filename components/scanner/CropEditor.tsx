@@ -159,7 +159,7 @@ const Handle = ({ position, bounds }: HandleProps) => {
 };
 
 export default function CropEditor({
-  imageUri, initialCorners, onCancel, onConfirm,
+  imageUri, initialCorners, photoAspect, frameAspect, onCancel, onConfirm,
 }: CropEditorProps) {
   const insets = useSafeAreaInsets();
 
@@ -170,6 +170,14 @@ export default function CropEditor({
   const [isCropping,  setIsCropping]  = React.useState(false);
   const cornersPositioned             = React.useRef(false);
   const headerBottom                  = insets.top + HEADER_H;
+  const [cachedFrameAspect, setCachedFrameAspect] = React.useState<number | undefined>(frameAspect);
+
+  // Update cached frameAspect when prop changes
+  React.useEffect(() => {
+    if (frameAspect !== undefined) {
+      setCachedFrameAspect(frameAspect);
+    }
+  }, [frameAspect]);
 
   const tl = useSharedValue<Point>({ x: PAD,            y: Math.max(PAD, headerBottom + 8) });
   const tr = useSharedValue<Point>({ x: SCREEN_W - PAD, y: Math.max(PAD, headerBottom + 8) });
@@ -213,18 +221,36 @@ export default function CropEditor({
     setHandleBounds(bounds);
 
     if (initialCorners && useInitial) {
-      // initialCorners are in photo space (0-1) — map directly into contain-rect screen space
-      tl.value = normalizedToScreen(initialCorners.tl, displayRect, bounds);
-      tr.value = normalizedToScreen(initialCorners.tr, displayRect, bounds);
-      br.value = normalizedToScreen(initialCorners.br, displayRect, bounds);
-      bl.value = normalizedToScreen(initialCorners.bl, displayRect, bounds);
+      // initialCorners come from CustomScanner detection.
+      // They are in PHOTO space if detectDocumentJS succeeded, or in FRAME space if using frame detection as fallback.
+      // We need to detect if we need rotation: frameAspect > 1 (landscape frame) but imageSize is portrait → corners are rotated 90°CW
+      const frameIsLandscape = (cachedFrameAspect ?? 1) > 1;
+      const imageIsPortrait = (imageSize?.height ?? 0) > (imageSize?.width ?? 0);
+      const needsRotation = frameIsLandscape && imageIsPortrait;
+
+      let processCorners = initialCorners;
+      if (needsRotation) {
+        // Áp dụng phép xoay tọa độ 90° thuận chiều kim đồng hồ (90° CW)
+        const rot = (p: { x: number; y: number }) => ({ x: 1 - p.y, y: p.x });
+        processCorners = {
+          tl: rot(initialCorners.bl),
+          tr: rot(initialCorners.tl),
+          br: rot(initialCorners.tr),
+          bl: rot(initialCorners.br),
+        };
+      }
+
+      tl.value = normalizedToScreen(processCorners.tl, displayRect, bounds);
+      tr.value = normalizedToScreen(processCorners.tr, displayRect, bounds);
+      br.value = normalizedToScreen(processCorners.br, displayRect, bounds);
+      bl.value = normalizedToScreen(processCorners.bl, displayRect, bounds);
     } else {
       tl.value = { x: offsetX + PAD,            y: bounds.minY };
       tr.value = { x: offsetX + displayW - PAD, y: bounds.minY };
       br.value = { x: offsetX + displayW - PAD, y: offsetY + displayH - PAD };
       bl.value = { x: offsetX + PAD,            y: offsetY + displayH - PAD };
     }
-  }, [displayRect]);
+  }, [displayRect, useInitial]);
 
   const path = useDerivedValue(() => {
     const p = Skia.Path.Make();

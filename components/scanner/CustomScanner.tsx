@@ -700,7 +700,11 @@ export default function CustomScanner({ onCapture, onCancel }: CustomScannerProp
     docMaxY.value = Math.max(sc.tl.y, sc.tr.y, sc.bl.y, sc.br.y);
 
     // Nới lỏng ngưỡng stable lên 8% để dễ auto-capture khi dí sát
-    const currentlyStable = movedRaw < 0.08;
+    // Nhưng nếu document quá lớn (>85% frame), nới lỏng ngưỡng (tăng lên) để dễ trigger hơn
+    const cornersArea = rawCorners
+      ? Math.abs((rawCorners.tr.x - rawCorners.tl.x) * (rawCorners.bl.y - rawCorners.tl.y))
+      : 0;
+    const currentlyStable = movedRaw < (cornersArea > 0.85 ? 0.12 : 0.08);
 
     if (currentlyStable) {
       stableFrameCount.current++;
@@ -826,32 +830,20 @@ export default function CustomScanner({ onCapture, onCancel }: CustomScannerProp
       const pFile  = photoFile as any;
       const uri    = `file://${photoFile.filePath}`;
       
-      let accurateCorners: DocCorners | null = detectedCorners;
-      if (detectedCorners) {
-        const frameIsLandscape = frameAspectShared.value > 1;
-        const screenIsPortrait = SCREEN_W < SCREEN_H;
-        if (frameIsLandscape && screenIsPortrait) {
-          const rot = (p: {x:number, y:number}) => ({ x: p.y, y: 1 - p.x });
-          accurateCorners = {
-            tl: rot(detectedCorners.tr),
-            tr: rot(detectedCorners.br),
-            br: rot(detectedCorners.bl),
-            bl: rot(detectedCorners.tl),
-          };
-        }
-      }
- 
+let accurateCorners: DocCorners | null = detectedCorners;
+
+      // Re-detect on thumbnail for more accurate corners
       try {
         const thumb = await manipulateAsync(
           uri,
           [{ resize: { width: 800 } }],
           { format: SaveFormat.JPEG, compress: 0.85 },
         );
- 
+
         const b64 = await FileSystem.readAsStringAsync(thumb.uri, {
           encoding: 'base64' as any,
         });
- 
+
         let srcMatId: string | null = null;
         try {
           const srcMat   = OpenCV.base64ToMat(b64);
@@ -859,9 +851,9 @@ export default function CustomScanner({ onCapture, onCancel }: CustomScannerProp
           const detected = detectDocumentJS(
             srcMat, thumb.width, thumb.height, 3,
             scanTarget === 'card' ? 0.08 : 0.06,
-            scanTarget,  // ✅ FIX: truyền đúng target cho JS thread
+            scanTarget,
           );
- 
+
           if (detected) accurateCorners = detected;
         } finally {
           if (srcMatId) {
